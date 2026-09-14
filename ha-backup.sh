@@ -2,6 +2,7 @@
 set -euo pipefail
 
 CONF_BACKUP="/root/.ha-backup.conf"
+LOCK_FILE="/run/ha-backup.lock"
 
 if [ ! -f "$CONF_BACKUP" ]; then
     echo "ОШИБКА: $CONF_BACKUP не найден" >&2
@@ -26,76 +27,177 @@ BW_LIMIT="${BW_LIMIT:-0}"
 : "${JOBS:?JOBS не задан}"
 
 mkdir -p "$LOGDIR"
+
 LOGFILE="$LOGDIR/ha-backup-$(date +%F).log"
 
-# ---------- очистка старых логов ----------
+# =========================================================
+# Защита от параллельного запуска
+# =========================================================
+
+exec 9>"$LOCK_FILE"
+
+if ! flock -n 9; then
+    echo "ОШИБКА: другой экземпляр ha-backup уже запущен" >&2
+    exit 1
+fi
+
+# =========================================================
+# Логирование
+# =========================================================
+
+log() {
+    echo "$(date +'%Y-%m-%d %H:%M:%S') $*" >> "$LOGFILE"
+}
+
+NOW() {
+    date +'%Y-%m-%d %H:%M:%S'
+}
+
+HOSTNAME_SHORT=$(hostname)
+
+# =========================================================
+# Очистка старых логов
+# =========================================================
+
 cleanup_old_logs() {
     local days="${LOG_RETENTION_DAYS:-7}"
     local count
-    count=$(find "$LOGDIR" -maxdepth 1 -type f -name 'ha-backup-*.log' -mtime +"$days" 2>/dev/null | wc -l)
+
+    count=$(
+        find "$LOGDIR" \
+            -maxdepth 1 \
+            -type f \
+            -name 'ha-backup-*.log' \
+            -mtime +"$days" \
+            2>/dev/null |
+        wc -l
+    )
+
     if [ "$count" -gt 0 ]; then
-        find "$LOGDIR" -maxdepth 1 -type f -name 'ha-backup-*.log' -mtime +"$days" -delete 2>/dev/null || true
-        echo "$(date +'%Y-%m-%d %H:%M:%S') Удалено старых логов: $count (старше ${days} дней)" >> "$LOGFILE"
+        find "$LOGDIR" \
+            -maxdepth 1 \
+            -type f \
+            -name 'ha-backup-*.log' \
+            -mtime +"$days" \
+            -delete \
+            2>/dev/null || true
+
+        echo "$(NOW) Удалено старых логов: $count (старше ${days} дней)" >> "$LOGFILE"
     fi
 }
 
-log() { echo "$(date +'%Y-%m-%d %H:%M:%S') $*" >> "$LOGFILE"; }
-
-NOW() { date +'%Y-%m-%d %H:%M:%S'; }
-HOSTNAME_SHORT=$(hostname)
+# =========================================================
+# Форматирование времени
+# =========================================================
 
 human_duration() {
-    local SEC=$1
-    local M=$((SEC / 60))
-    local S=$((SEC % 60))
-    if [ "$M" -gt 0 ]; then
-        echo "${M} мин ${S} сек"
+    local sec="$1"
+    local hours=$((sec / 3600))
+    local minutes=$(((sec % 3600) / 60))
+    local seconds=$((sec % 60))
+
+    if [ "$hours" -gt 0 ]; then
+        echo "${hours} ч ${minutes} мин ${seconds} сек"
+    elif [ "$minutes" -gt 0 ]; then
+        echo "${minutes} мин ${seconds} сек"
     else
-        echo "${S} сек"
+        echo "${seconds} сек"
     fi
 }
 
+# =========================================================
+# HTML escape для Telegram
+# =========================================================
+
 html_escape() {
-    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+    sed \
+        -e 's/&/\&amp;/g' \
+        -e 's/</\&lt;/g' \
+        -e 's/>/\&gt;/g' \
+        -e 's/"/\&quot;/g'
 }
 
+# =========================================================
+# Telegram
+# =========================================================
+
 send_telegram_raw() {
-    local TEXT="$1"
-    local SILENT="${2:-false}"
+    local text="$1"
+    local silent="${2:-false}"
+
     if [ -z "${TG_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
         log "TG: пропуск — токен или chat_id не заданы"
         return 0
     fi
-    local curl_args=(-s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage")
+
+    local curl_args=(
+        --silent
+        --show-error
+        --fail
+        --request POST
+        "https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
+    )
+
     if [ -n "${TG_PROXY:-}" ]; then
         curl_args+=(-x "$TG_PROXY")
     fi
+
     curl_args+=(
         --data-urlencode "chat_id=${TG_CHAT_ID}"
-        --data-urlencode "text=${TEXT}"
+        --data-urlencode "text=${text}"
         --data-urlencode "parse_mode=HTML"
-        --data-urlencode "disable_notification=${SILENT}"
+        --data-urlencode "disable_notification=${silent}"
         --max-time 20
     )
-    local RESP
-    RESP=$(curl "${curl_args[@]}" 2>&1) || true
-    log "TG: silent=$SILENT resp=$RESP"
+
+    local response
+
+    if ! response=$(curl "${curl_args[@]}" 2>&1); then
+        log "TG: ошибка curl: $response"
+        return 1
+    fi
+
+    log "TG: silent=${silent} response=${response}"
+
+    if ! printf '%s' "$response" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
+        log "TG: API вернул ошибку"
+        return 1
+    fi
+
+    return 0
 }
 
 send_telegram() {
-    local TEXT="$1"
-    local TYPE="$2"
-    if [ "$TYPE" = "success" ]; then
-        [ "${TG_NOTIFY_SUCCESS}" = "true" ] || { log "TG: success отключён"; return 0; }
-        send_telegram_raw "$TEXT" "${TG_SILENT_SUCCESS}"
-    elif [ "$TYPE" = "error" ]; then
-        [ "${TG_NOTIFY_ERROR}" = "true" ] || { log "TG: error отключён"; return 0; }
-        send_telegram_raw "$TEXT" "${TG_SILENT_ERROR}"
+    local text="$1"
+    local type="$2"
+
+    if [ "$type" = "success" ]; then
+        [ "${TG_NOTIFY_SUCCESS}" = "true" ] ||
+            {
+                log "TG: success отключён"
+                return 0
+            }
+
+        send_telegram_raw "$text" "${TG_SILENT_SUCCESS}" || true
+
+    elif [ "$type" = "error" ]; then
+        [ "${TG_NOTIFY_ERROR}" = "true" ] ||
+            {
+                log "TG: error отключён"
+                return 0
+            }
+
+        send_telegram_raw "$text" "${TG_SILENT_ERROR}" || true
     fi
 }
 
+# =========================================================
+# Проверка CIFS mount
+# =========================================================
+
 if ! mountpoint -q "$MOUNTPOINT"; then
     log "ОШИБКА: $MOUNTPOINT не смонтирован, бэкап прерван"
+
     MSG="🔴 <b>Бэкап HA не выполнен</b>
 
 <b>Что случилось:</b>
@@ -111,65 +213,185 @@ if ! mountpoint -q "$MOUNTPOINT"; then
 
 Хост: <code>${HOSTNAME_SHORT}</code>
 Время: <code>$(NOW)</code>"
+
     send_telegram "$MSG" error
     exit 1
 fi
 
 FSTYPE=$(findmnt -n -o FSTYPE --target "$MOUNTPOINT" 2>/dev/null | tail -1)
+
 if [ "$FSTYPE" != "cifs" ]; then
     log "ОШИБКА: $MOUNTPOINT имеет тип '$FSTYPE', ожидался cifs"
+
     MSG="🔴 <b>Бэкап HA не выполнен</b>
 
 <b>Что случилось:</b>
 Папка <code>${MOUNTPOINT}</code> не подключена к сетевой шаре.
-Сейчас это просто пустая локальная папка на SD-карте.
+Сейчас это просто локальная папка на SD-карте.
 
 <b>Последствия:</b>
-Если бы бэкап пошёл туда, он лёг бы на SD-карту Armbian
-и мог её забить. Бэкап остановлен, чтобы этого не случилось.
+Бэкап остановлен, чтобы данные не записались
+на локальный накопитель.
 
 <b>Что делать:</b>
 Проверьте связь с TrueNAS.
-Если связи нет — следующий запуск попробует снова.
 
 Хост: <code>${HOSTNAME_SHORT}</code>
 Время: <code>$(NOW)</code>"
+
     send_telegram "$MSG" error
     exit 1
 fi
 
 log "Проверки пройдены: $MOUNTPOINT ($FSTYPE) доступен"
 
+# =========================================================
+# Очистка логов
+# =========================================================
+
 cleanup_old_logs
 
 START_TS=$(date +%s)
+
 log "=== Старт бэкапа $(NOW) ==="
 log "Задач в очереди: ${#JOBS[@]}"
 
+TOTAL_FILES=0
+TOTAL_BYTES=0
+COMPLETED_JOBS=0
+
+# =========================================================
+# Backup jobs
+# =========================================================
+
 for job in "${JOBS[@]}"; do
+
     IFS='|' read -r SRC DST EXCL DEL <<< "$job"
+
     TARGET="$DEST$DST"
+
     if [ ! -e "$SRC" ]; then
         log "ПРЕДУПРЕЖДЕНИЕ: $SRC не существует, пропущено"
         continue
     fi
+
+    # -----------------------------------------------------
+    # Защита от rsync --delete на пустом источнике
+    # -----------------------------------------------------
+
+    if [ "$DEL" = "yes" ]; then
+
+        if [ -d "$SRC" ]; then
+            SOURCE_COUNT=$(
+                find "$SRC" \
+                    -mindepth 1 \
+                    -maxdepth 1 \
+                    -print \
+                    -quit \
+                    2>/dev/null |
+                wc -l
+            )
+
+            if [ "$SOURCE_COUNT" -eq 0 ]; then
+
+                log "ОШИБКА: источник $SRC пуст, --delete запрещён"
+
+                MSG="🔴 <b>Бэкап HA остановлен</b>
+
+<b>Причина:</b>
+Источник <code>${SRC}</code> оказался пустым.
+
+Для безопасности операция <code>rsync --delete</code>
+не выполнена.
+
+<b>Это защита от случайного удаления бэкапа.</b>
+
+Хост: <code>${HOSTNAME_SHORT}</code>
+Время: <code>$(NOW)</code>"
+
+                send_telegram "$MSG" error
+                exit 1
+            fi
+        fi
+    fi
+
     mkdir -p "$TARGET"
-    RSYNC_OPTS=(-av)
-    [ "$BW_LIMIT" != "0" ] && RSYNC_OPTS+=(--bwlimit="$BW_LIMIT")
+
+    RSYNC_OPTS=(
+        -a
+        -v
+        --stats
+    )
+
+    if [ "$BW_LIMIT" != "0" ]; then
+        RSYNC_OPTS+=(--bwlimit="$BW_LIMIT")
+    fi
+
     if [ -n "$EXCL" ]; then
         IFS=',' read -ra EXCL_ARR <<< "$EXCL"
+
         for e in "${EXCL_ARR[@]}"; do
             RSYNC_OPTS+=(--exclude="$e")
         done
     fi
-    [ "$DEL" = "yes" ] && RSYNC_OPTS+=(--delete)
+
+    if [ "$DEL" = "yes" ]; then
+        RSYNC_OPTS+=(--delete)
+    fi
+
     log "rsync $SRC -> $TARGET [excl='${EXCL:-нет}' delete=${DEL:-no} bw=${BW_LIMIT}]"
-    if rsync "${RSYNC_OPTS[@]}" "$SRC" "$TARGET" >> "$LOGFILE" 2>&1; then
+
+    JOB_LOG="$LOGDIR/.rsync-job-$$.log"
+
+    if rsync "${RSYNC_OPTS[@]}" "$SRC" "$TARGET" > "$JOB_LOG" 2>&1; then
+
+        cat "$JOB_LOG" >> "$LOGFILE"
+
+        JOB_STATS=$(
+            grep -E \
+                'Number of regular files transferred|Total transferred file size|Number of files|Number of created files' \
+                "$JOB_LOG" |
+            tr '\n' '; ' |
+            sed 's/; $//'
+        )
+
         log "OK: $SRC"
+        log "Статистика: ${JOB_STATS:-нет данных}"
+
+        JOB_FILES=$(
+            awk -F': ' '/Number of regular files transferred/ {gsub(/,/,"",$2); print $2}' "$JOB_LOG" |
+            tail -1
+        )
+
+        JOB_BYTES=$(
+            awk -F': ' '/Total transferred file size/ {
+                gsub(/ bytes/,"",$2)
+                gsub(/,/,"",$2)
+                print $2
+            }' "$JOB_LOG" |
+            tail -1
+        )
+
+        if [[ "$JOB_FILES" =~ ^[0-9]+$ ]]; then
+            TOTAL_FILES=$((TOTAL_FILES + JOB_FILES))
+        fi
+
+        if [[ "$JOB_BYTES" =~ ^[0-9]+$ ]]; then
+            TOTAL_BYTES=$((TOTAL_BYTES + JOB_BYTES))
+        fi
+
+        COMPLETED_JOBS=$((COMPLETED_JOBS + 1))
+
     else
+
         RC=$?
-        ERR_TAIL=$(tail -5 "$LOGFILE" | html_escape)
+
+        cat "$JOB_LOG" >> "$LOGFILE"
+
+        ERR_TAIL=$(tail -5 "$JOB_LOG" | html_escape)
+
         log "ОШИБКА: rsync $SRC код $RC"
+
         MSG="🔴 <b>Бэкап HA прерван</b>
 
 <b>Что случилось:</b>
@@ -178,10 +400,7 @@ for job in "${JOBS[@]}"; do
 
 <b>Последствия:</b>
 Часть файлов может быть не скопирована.
-Следующий запуск продолжит с места остановки.
-
-<b>Что делать:</b>
-Если ошибка повторяется — проверьте доступ к TrueNAS.
+Следующий запуск продолжит работу.
 
 Хост: <code>${HOSTNAME_SHORT}</code>
 Время: <code>$(NOW)</code>
@@ -190,16 +409,39 @@ for job in "${JOBS[@]}"; do
 
 <b>Последние строки лога:</b>
 <pre>${ERR_TAIL}</pre>"
+
+        rm -f "$JOB_LOG"
+
         send_telegram "$MSG" error
         exit 1
     fi
+
+    rm -f "$JOB_LOG"
+
 done
+
+# =========================================================
+# Финальная статистика
+# =========================================================
 
 END_TS=$(date +%s)
 DURATION=$((END_TS - START_TS))
 DURATION_HUMAN=$(human_duration "$DURATION")
+
 SIZE_TOTAL=$(du -sh "$DEST" 2>/dev/null | awk '{print $1}')
-log "=== Бэкап успешно завершён $(NOW), занял ${DURATION} сек (${DURATION_HUMAN}), размер: ${SIZE_TOTAL} ==="
+
+if [ "$TOTAL_BYTES" -gt 0 ]; then
+    TRANSFERRED_HUMAN=$(numfmt --to=iec "$TOTAL_BYTES")
+else
+    TRANSFERRED_HUMAN="0"
+fi
+
+log "=== Бэкап успешно завершён $(NOW) ==="
+log "Задач выполнено: ${COMPLETED_JOBS}/${#JOBS[@]}"
+log "Файлов передано: ${TOTAL_FILES}"
+log "Данных передано: ${TRANSFERRED_HUMAN}"
+log "Размер backup: ${SIZE_TOTAL:-неизвестно}"
+log "Время выполнения: ${DURATION_HUMAN}"
 
 MSG="🟢 <b>Бэкап HA выполнен</b>
 
@@ -207,8 +449,13 @@ MSG="🟢 <b>Бэкап HA выполнен</b>
 
 Хост: <code>${HOSTNAME_SHORT}</code>
 Время: <code>$(NOW)</code>
-Заняло: <code>${DURATION_HUMAN}</code>
-Размер: <code>${SIZE_TOTAL}</code>"
+
+Задач: <code>${COMPLETED_JOBS}/${#JOBS[@]}</code>
+Файлов передано: <code>${TOTAL_FILES}</code>
+Данных передано: <code>${TRANSFERRED_HUMAN}</code>
+Размер backup: <code>${SIZE_TOTAL:-неизвестно}</code>
+Заняло: <code>${DURATION_HUMAN}</code>"
+
 send_telegram "$MSG" success
 
 exit 0
