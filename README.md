@@ -1,5 +1,9 @@
 # HA Backup to TrueNAS
 
+![Shellcheck](https://github.com/Maotsk/ha-backup/actions/workflows/check.yml/badge.svg)
+![License](https://img.shields.io/github/license/Maotsk/ha-backup)
+![Last commit](https://img.shields.io/github/last-commit/Maotsk/ha-backup)
+
 Скрипт автоматического бэкапа Home Assistant (и сопутствующих конфигов) с Armbian-хоста на сетевую шару TrueNAS через CIFS/SMB.
 
 Работает на слабых SBC (Orange Pi, NanoPi, Rock Pi и т.п.), устойчив к обрывам сети, уведомляет в Telegram через SOCKS5-прокси и сам чистит старые логи.
@@ -278,106 +282,6 @@ TG_NOTIFY_SUCCESS="false"
 TG_NOTIFY_ERROR="false"
 ```
 
-## Конфигурация
-
-Файл `/root/.ha-backup.conf` — единственное место, где настраивается всё.
-
-```bash
-# ---------- Куда бэкапить ----------
-DEST="/mnt/ha-dataset/backup/"
-MOUNTPOINT="/mnt/ha-dataset"
-LOGDIR="/var/log.hdd/ha"
-
-# ---------- Ограничение скорости rsync (КБ/с) ----------
-# 0 = без ограничения
-BW_LIMIT="5000"
-
-# ---------- Сколько дней хранить логи ----------
-LOG_RETENTION_DAYS="7"
-
-# ---------- Telegram ----------
-TG_TOKEN=""
-TG_CHAT_ID=""
-TG_PROXY="socks5h://127.0.0.1:1080"
-
-# Что отправлять
-TG_NOTIFY_SUCCESS="true"
-TG_NOTIFY_ERROR="true"
-
-# Тихий режим (без звука/вибрации)
-TG_SILENT_SUCCESS="true"
-TG_SILENT_ERROR="false"
-
-# ---------- Что бэкапить ----------
-# Формат: "ИСТОЧНИК|ПОДПАПКА_НА_ШАРЕ|ИСКЛЮЧЕНИЯ|--delete?"
-JOBS=(
-    "/ha/|backup/ha/|*.log|yes"
-    "/root/docker-compose.yaml|backup/docker-config/||no"
-    "/root/ha-backup.sh|backup/scripts/||no"
-    "/root/.ha-backup.conf|backup/scripts/||no"
-    "/root/.smbcredentials|backup/scripts/||no"
-    "/etc/fstab|backup/system/||no"
-)
-```
-
-### Параметры
-
-| Параметр | Описание |
-|---|---|
-| `DEST` | Куда на шаре складывать бэкапы |
-| `MOUNTPOINT` | Точка монтирования шары (проверяется) |
-| `LOGDIR` | Где хранить логи |
-| `BW_LIMIT` | Ограничение скорости rsync (КБ/с). `0` — без лимита |
-| `LOG_RETENTION_DAYS` | Сколько дней хранить логи |
-| `TG_TOKEN` | Токен Telegram-бота от `@BotFather` |
-| `TG_CHAT_ID` | ID чата (узнать через `getUpdates`) |
-| `TG_PROXY` | SOCKS5-прокси. Пусто = без прокси |
-| `TG_NOTIFY_SUCCESS` | Отправлять сообщение при успехе |
-| `TG_NOTIFY_ERROR` | Отправлять сообщение при ошибке |
-| `TG_SILENT_SUCCESS` | Успех — без звука (`true`) или со звуком (`false`) |
-| `TG_SILENT_ERROR` | Ошибка — без звука (`true`) или со звуком (`false`) |
-| `JOBS` | Массив задач: что, куда, исключения, `--delete` |
-
-### Формат `JOBS`
-
-Каждая задача — строка из 4 полей, разделённых `|`:
-
-```
-"ИСТОЧНИК|ПОДПАПКА_НА_ШАРЕ|ИСКЛЮЧЕНИЯ|--delete?"
-```
-
-- **ИСТОЧНИК** — что копируем. Для папок — обязательно со слешем на конце (`/ha/`, а не `/ha`), иначе `rsync` создаст вложенную папку с именем источника.
-- **ПОДПАПКА_НА_ШАРЕ** — путь относительно `DEST`.
-- **ИСКЛЮЧЕНИЯ** — маски через запятую (`*.log,*.tmp`), либо пусто.
-- **--delete?** — `yes` = удалять на шаре то, чего нет в источнике. `no` = только добавлять/обновлять.
-
-### Примеры
-
-**Добавить бэкап systemd-юнитов:**
-
-```bash
-"/etc/systemd/system/|backup/systemd/||no"
-```
-
-**Исключить БД и кэш из `/ha`:**
-
-```bash
-"/ha/|backup/ha/|*.log,*.db-wal,*.db-shm|yes"
-```
-
-**Без ограничения скорости:**
-
-```bash
-BW_LIMIT="0"
-```
-
-**Полная тишина (только логи):**
-
-```bash
-TG_NOTIFY_SUCCESS="false"
-TG_NOTIFY_ERROR="false"
-```
-
 ## Использование
 
 ### Запуск вручную
@@ -521,7 +425,3 @@ sudo grep '^LOG_RETENTION_DAYS' /root/.ha-backup.conf
 ## Лицензия
 
 MIT — используйте, модифицируйте, распространяйте свободно.
-
-## Автор
-
-Антон ([@maotsk](https://github.com/maotsk))
