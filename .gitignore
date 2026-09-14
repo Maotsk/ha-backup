@@ -1,0 +1,6 @@
+# Реальные конфиги — не коммитить
+.smbcredentials
+.ha-backup.conf
+*.log
+*.bak
+*.bak.*
