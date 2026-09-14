@@ -1,0 +1,12 @@
+[Unit]
+Description=Home Assistant Backup to TrueNAS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/root/ha-backup.sh
+User=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
