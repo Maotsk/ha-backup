@@ -7,6 +7,8 @@ if [ ! -f "$CONF_BACKUP" ]; then
     echo "ОШИБКА: $CONF_BACKUP не найден" >&2
     exit 1
 fi
+
+# shellcheck disable=SC1090
 source "$CONF_BACKUP"
 
 TG_TOKEN="${TG_TOKEN:-}"
