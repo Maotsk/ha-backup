@@ -1,0 +1,12 @@
+[Unit]
+Description=Run HA Backup daily at 04:00
+Requires=ha-backup.service
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=ha-backup.service
+
+[Install]
+WantedBy=timers.target
