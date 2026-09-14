@@ -83,7 +83,6 @@ JOBS=(
     # --- Скрипты и конфиги (чтобы восстановить бэкап) ---
     "/root/ha-backup.sh|backup/scripts/||no"
     "/root/.ha-backup.conf|backup/scripts/||no"
-    "/root/.smbcredentials|backup/scripts/||no"
 
     # --- Системные файлы для восстановления ---
     "/etc/fstab|backup/system/||no"
