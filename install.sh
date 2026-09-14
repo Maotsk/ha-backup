@@ -1,4 +1,3 @@
-```bash
 #!/bin/bash
 set -euo pipefail
 
@@ -290,4 +289,3 @@ echo "Лог backup:"
 echo "  /var/log/ha-backup/"
 
 exit 0
-```
