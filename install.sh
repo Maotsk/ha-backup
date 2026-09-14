@@ -1,17 +1,27 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_URL="https://raw.githubusercontent.com/Maotsk/ha-backup/main/ha-backup.sh"
-INSTALL_PATH="/usr/local/bin/ha-backup.sh"
+# =========================================================
+# Home Assistant Backup Installer
+# Version: 1.0.0
+# =========================================================
+
+REPO="Maotsk/ha-backup"
+REF="${HA_BACKUP_REF:-v1.0.0}"
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
+
+INSTALL_PATH="/root/ha-backup.sh"
+
+CONF_PATH="/root/.ha-backup.conf"
+CONF_EXAMPLE_PATH="/root/.ha-backup.conf.example"
+CREDENTIALS_PATH="/root/.smbcredentials"
 
 SERVICE_PATH="/etc/systemd/system/ha-backup.service"
 TIMER_PATH="/etc/systemd/system/ha-backup.timer"
 
-CONF_PATH="/root/.ha-backup.conf"
-CREDENTIALS_PATH="/root/.smbcredentials"
-
 echo "========================================"
 echo " Home Assistant Backup Installer"
+echo " Version: ${REF}"
 echo "========================================"
 
 # =========================================================
@@ -24,7 +34,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # =========================================================
-# Установка необходимых пакетов
+# Проверка зависимостей
 # =========================================================
 
 echo
@@ -42,221 +52,225 @@ apt-get install -y \
     util-linux
 
 # =========================================================
-# Установка ha-backup.sh
+# Временные файлы
+# =========================================================
+
+TMP_DIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT
+
+# =========================================================
+# Загрузка файлов из репозитория
 # =========================================================
 
 echo
-echo "[2/7] Установка ha-backup.sh..."
+echo "[2/7] Загрузка файлов версии ${REF}..."
 
-TMP_SCRIPT=$(mktemp)
+download_file() {
+    local url="$1"
+    local destination="$2"
 
-trap 'rm -f "$TMP_SCRIPT"' EXIT
+    curl \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --retry 3 \
+        --retry-delay 2 \
+        "$url" \
+        -o "$destination"
+}
 
-curl \
-    --fail \
-    --silent \
-    --show-error \
-    --location \
-    --retry 3 \
-    "$SCRIPT_URL" \
-    -o "$TMP_SCRIPT"
+download_file \
+    "${RAW_BASE}/ha-backup.sh" \
+    "${TMP_DIR}/ha-backup.sh"
+
+download_file \
+    "${RAW_BASE}/.ha-backup.conf.example" \
+    "${TMP_DIR}/.ha-backup.conf.example"
+
+download_file \
+    "${RAW_BASE}/ha-backup.service" \
+    "${TMP_DIR}/ha-backup.service"
+
+download_file \
+    "${RAW_BASE}/ha-backup.timer" \
+    "${TMP_DIR}/ha-backup.timer"
+
+# =========================================================
+# Проверка загруженного скрипта
+# =========================================================
+
+echo
+echo "[3/7] Проверка ha-backup.sh..."
+
+bash -n "${TMP_DIR}/ha-backup.sh"
 
 install \
     -o root \
     -g root \
     -m 0755 \
-    "$TMP_SCRIPT" \
+    "${TMP_DIR}/ha-backup.sh" \
     "$INSTALL_PATH"
 
 echo "Установлен:"
-echo "$INSTALL_PATH"
+echo "  $INSTALL_PATH"
 
 # =========================================================
 # Конфигурация
 # =========================================================
 
 echo
-echo "[3/7] Проверка конфигурации..."
+echo "[4/7] Проверка конфигурации..."
 
 if [ ! -f "$CONF_PATH" ]; then
 
-    cat > "$CONF_PATH" <<'EOF'
-# =========================================================
-# Home Assistant Backup configuration
-# =========================================================
+    install \
+        -o root \
+        -g root \
+        -m 0600 \
+        "${TMP_DIR}/.ha-backup.conf.example" \
+        "$CONF_PATH"
 
-# ---------------------------------------------------------
-# TrueNAS
-# ---------------------------------------------------------
-
-MOUNTPOINT="/mnt/truenas"
-DEST="/mnt/truenas/home-assistant"
-
-# ---------------------------------------------------------
-# Логи
-# ---------------------------------------------------------
-
-LOGDIR="/var/log/ha-backup"
-LOG_RETENTION_DAYS=7
-
-# ---------------------------------------------------------
-# Rsync
-# ---------------------------------------------------------
-
-# 0 = без ограничения скорости
-BW_LIMIT=0
-
-# ---------------------------------------------------------
-# Telegram
-# ---------------------------------------------------------
-
-TG_TOKEN=""
-TG_CHAT_ID=""
-
-# SOCKS5 / HTTP proxy.
-# Оставить пустым, если proxy не нужен.
-TG_PROXY=""
-
-TG_NOTIFY_SUCCESS="true"
-TG_NOTIFY_ERROR="true"
-
-TG_SILENT_SUCCESS="true"
-TG_SILENT_ERROR="false"
-
-# ---------------------------------------------------------
-# Задачи
-#
-# Формат:
-#
-# "SOURCE|DESTINATION|EXCLUDES|DELETE"
-#
-# DELETE:
-#   yes = использовать rsync --delete
-#   no  = не удалять файлы назначения
-# ---------------------------------------------------------
-
-JOBS=(
-    "/ha|backup/home-assistant||yes"
-    "/root/.ha-backup.conf|backup/scripts/||no"
-    "/root/.smbcredentials|backup/scripts/||no"
-)
-EOF
-
-    chmod 600 "$CONF_PATH"
-
-    echo "Создан:"
-    echo "$CONF_PATH"
+    echo "Создан новый конфиг:"
+    echo "  $CONF_PATH"
 
 else
 
     chmod 600 "$CONF_PATH"
+    chown root:root "$CONF_PATH"
 
-    echo "Конфигурация уже существует:"
-    echo "$CONF_PATH"
-
+    echo "Существующий конфиг НЕ изменён:"
+    echo "  $CONF_PATH"
 fi
+
+# Сохраняем example отдельно для справки.
+install \
+    -o root \
+    -g root \
+    -m 0644 \
+    "${TMP_DIR}/.ha-backup.conf.example" \
+    "$CONF_EXAMPLE_PATH"
+
+echo "Example-конфиг:"
+echo "  $CONF_EXAMPLE_PATH"
 
 # =========================================================
 # SMB credentials
 # =========================================================
 
 echo
-echo "[4/7] Проверка SMB credentials..."
+echo "[5/7] Проверка SMB credentials..."
 
 if [ -f "$CREDENTIALS_PATH" ]; then
+
     chmod 600 "$CREDENTIALS_PATH"
     chown root:root "$CREDENTIALS_PATH"
 
     echo "Credentials найдены:"
-    echo "$CREDENTIALS_PATH"
+    echo "  $CREDENTIALS_PATH"
+
 else
-    echo "ВНИМАНИЕ: $CREDENTIALS_PATH не найден."
-    echo "Если CIFS требует авторизацию — создайте его перед запуском."
+
+    echo "ВНИМАНИЕ:"
+    echo "  $CREDENTIALS_PATH не найден."
+
+    echo
+    echo "Если CIFS использует авторизацию,"
+    echo "создайте credentials перед запуском backup."
+
 fi
 
 # =========================================================
 # Каталог логов
 # =========================================================
 
+LOGDIR="/var/log.hdd/ha"
+
 echo
-echo "[5/7] Создание каталога логов..."
+echo "Создание каталога логов:"
+echo "  $LOGDIR"
 
-mkdir -p "/var/log/ha-backup"
+mkdir -p "$LOGDIR"
 
-chmod 750 "/var/log/ha-backup"
-
-chown root:root "/var/log/ha-backup"
+chmod 750 "$LOGDIR"
+chown root:root "$LOGDIR"
 
 # =========================================================
 # systemd service
 # =========================================================
 
 echo
-echo "[6/7] Создание systemd service..."
+echo "[6/7] Установка systemd service..."
 
-cat > "$SERVICE_PATH" <<'EOF'
-[Unit]
-Description=Home Assistant Backup
-After=network-online.target
-Wants=network-online.target
+install \
+    -o root \
+    -g root \
+    -m 0644 \
+    "${TMP_DIR}/ha-backup.service" \
+    "$SERVICE_PATH"
 
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/ha-backup.sh
-
-User=root
-Group=root
-
-# Немного дополнительной защиты systemd
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-EOF
+echo "Установлен:"
+echo "  $SERVICE_PATH"
 
 # =========================================================
 # systemd timer
 # =========================================================
 
-cat > "$TIMER_PATH" <<'EOF'
-[Unit]
-Description=Home Assistant Backup Timer
+install \
+    -o root \
+    -g root \
+    -m 0644 \
+    "${TMP_DIR}/ha-backup.timer" \
+    "$TIMER_PATH"
 
-[Timer]
-OnCalendar=*-*-* 03:00:00
-Persistent=true
-
-RandomizedDelaySec=5min
-
-Unit=ha-backup.service
-
-[Install]
-WantedBy=timers.target
-EOF
+echo "Установлен:"
+echo "  $TIMER_PATH"
 
 # =========================================================
-# Запуск systemd
+# systemd
 # =========================================================
+
+echo
+echo "[7/7] Настройка systemd..."
 
 systemctl daemon-reload
 
-systemctl enable --now ha-backup.timer
+systemctl enable ha-backup.timer
+
+systemctl restart ha-backup.timer
 
 # =========================================================
 # Проверка
 # =========================================================
 
 echo
-echo "[7/7] Проверка установки..."
+echo "========================================"
+echo " Проверка установки"
+echo "========================================"
 
 echo
-echo "----------------------------------------"
 echo "ha-backup:"
 ls -l "$INSTALL_PATH"
 
 echo
-echo "systemd timer:"
+echo "Конфигурация:"
+ls -l "$CONF_PATH"
+
+echo
+echo "Service:"
+systemctl cat ha-backup.service --no-pager
+
+echo
+echo "Timer:"
+systemctl cat ha-backup.timer --no-pager
+
+echo
+echo "Статус timer:"
 systemctl status ha-backup.timer --no-pager || true
 
 echo
@@ -281,11 +295,11 @@ echo "Ручной запуск:"
 echo "  systemctl start ha-backup.service"
 
 echo
-echo "Просмотр лога:"
+echo "Проверка лога:"
 echo "  journalctl -u ha-backup.service"
 
 echo
-echo "Лог backup:"
-echo "  /var/log/ha-backup/"
+echo "Логи backup:"
+echo "  $LOGDIR"
 
 exit 0
