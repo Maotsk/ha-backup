@@ -4,3 +4,13 @@
 *.log
 *.bak
 *.bak.*
+
+# ОС
+.DS_Store
+Thumbs.db
+
+# Редакторы
+.vscode/
+.idea/
+*.swp
+*~
