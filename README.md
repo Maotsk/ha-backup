@@ -1,6 +1,5 @@
 # HA Backup to TrueNAS
 
-![Shellcheck](https://github.com/Maotsk/ha-backup/actions/workflows/check.yml/badge.svg)
 ![License](https://img.shields.io/github/license/Maotsk/ha-backup)
 ![Last commit](https://img.shields.io/github/last-commit/Maotsk/ha-backup)
 
