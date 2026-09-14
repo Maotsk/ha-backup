@@ -50,6 +50,7 @@ apt-get install -y \
     curl \
     findutils \
     util-linux
+    coreutils
 
 # =========================================================
 # Временные файлы
