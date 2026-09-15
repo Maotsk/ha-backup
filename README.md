@@ -3,6 +3,7 @@
 ![Shellcheck](https://github.com/Maotsk/ha-backup/actions/workflows/shellcheck.yml/badge.svg)
 ![License](https://img.shields.io/github/license/Maotsk/ha-backup)
 ![Last commit](https://img.shields.io/github/last-commit/Maotsk/ha-backup)
+![Version](https://img.shields.io/github/v/tag/Maotsk/ha-backup?label=version)
 
 Скрипт автоматического бэкапа Home Assistant и сопутствующих конфигов
 с Armbian-хоста на сетевую шару TrueNAS через CIFS/SMB.
@@ -36,7 +37,7 @@
 
 ## Что бэкапится по умолчанию
 
-| Источник | Назначение на шаре | `--delete` |
+| Источник | Итоговый путь на шаре | `--delete` |
 |---|---|---|
 | `/ha/` | `backup/ha/` | yes |
 | `/root/docker-compose.yaml` | `backup/docker-config/` | no |
@@ -63,6 +64,7 @@
 - `curl`
 - `findutils`
 - `util-linux`
+- `coreutils`
 - Telegram Bot API
 - CIFS/SMB
 
@@ -83,6 +85,7 @@
 - `curl`
 - `findutils`
 - `util-linux`
+- `coreutils`
 
 ## Установка
 
@@ -155,16 +158,28 @@ df -hT /mnt/ha-dataset
 
 ### 2. Установить HA Backup
 
-Скачать установщик версии `v1.0.0`:
+Скачать установщик:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/v1.0.0/install.sh -o /tmp/ha-backup-install.sh
+curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o /tmp/ha-backup-install.sh
 ```
 
 Запустить:
 
 ```bash
 sudo bash /tmp/ha-backup-install.sh
+```
+
+Установить конкретную версию:
+
+```bash
+HA_BACKUP_REF=v1.0.1 sudo -E bash /tmp/ha-backup-install.sh
+```
+
+Установить последнюю из ветки main:
+
+```bash
+HA_BACKUP_REF=main sudo -E bash /tmp/ha-backup-install.sh
 ```
 
 Установщик:
@@ -258,11 +273,11 @@ TG_SILENT_ERROR="false"
 
 # ---------- Что бэкапить ----------
 JOBS=(
-    "/ha/|backup/ha/|*.log|yes"
-    "/root/docker-compose.yaml|backup/docker-config/||no"
-    "/root/ha-backup.sh|backup/scripts/||no"
-    "/root/.ha-backup.conf|backup/scripts/||no"
-    "/etc/fstab|backup/system/||no"
+    "/ha/|ha/|*.log|yes"
+    "/root/docker-compose.yaml|docker-config/||no"
+    "/root/ha-backup.sh|scripts/||no"
+    "/root/.ha-backup.conf|scripts/||no"
+    "/etc/fstab|system/||no"
 )
 ```
 
@@ -316,13 +331,14 @@ TG_PROXY=""
 Например:
 
 ```bash
-"/ha/|backup/ha/|*.log|yes"
+"/ha/|ha/|*.log|yes"
 ```
 
 Расшифровка:
 
 - `/ha/` — источник;
-- `backup/ha/` — каталог назначения относительно `DEST`;
+-  `ha/` — каталог назначения относительно `DEST`
+  (итог: `/mnt/ha-dataset/backup/ha/`);
 - `*.log` — исключение;
 - `yes` — использовать `--delete`.
 
@@ -333,7 +349,7 @@ TG_PROXY=""
 Правильно:
 
 ```bash
-"/ha/|backup/ha/||yes"
+"/ha/|ha/||yes"
 ```
 
 Без завершающего `/` поведение `rsync` при копировании структуры каталогов будет другим.
@@ -361,19 +377,19 @@ no
 Добавить backup systemd-юнитов:
 
 ```bash
-"/etc/systemd/system/|backup/systemd/||no"
+"/etc/systemd/system/|systemd/||no"
 ```
 
 Добавить backup сетевых подключений:
 
 ```bash
-"/etc/NetworkManager/system-connections/|backup/network/||no"
+"/etc/NetworkManager/system-connections/|network/||no"
 ```
 
 Исключить несколько типов файлов:
 
 ```bash
-"/ha/|backup/ha/|*.log,*.db-wal,*.db-shm|yes"
+"/ha/|ha/|*.log,*.db-wal,*.db-shm|yes"
 ```
 
 Отключить ограничение скорости:
@@ -816,25 +832,20 @@ sudo bash -n /root/ha-backup.sh
 
 ## Обновление
 
-Установщик по умолчанию использует стабильный тег:
+Для обновления достаточно повторно запустить установщик:
 
-```text
-v1.0.0
+```bash
+curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o /tmp/ha-backup-install.sh
+sudo bash /tmp/ha-backup-install.sh
 ```
 
-Чтобы установить другую версию:
+Существующий /root/.ha-backup.conf не перезаписывается.
+
+Чтобы установить конкретную версию, используйте переменную HA_BACKUP_REF:
 
 ```bash
 HA_BACKUP_REF=v1.0.1 sudo -E bash /tmp/ha-backup-install.sh
 ```
-
-Существующий:
-
-```text
-/root/.ha-backup.conf
-```
-
-не перезаписывается установщиком.
 
 ## Версии
 
