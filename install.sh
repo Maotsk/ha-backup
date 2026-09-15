@@ -1,23 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# =========================================================
-# Home Assistant Backup Installer
-# Version: 1.0.0
-# =========================================================
-
 REPO="Maotsk/ha-backup"
 REF="${HA_BACKUP_REF:-v1.0.0}"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
-
-INSTALL_PATH="/root/ha-backup.sh"
-
-CONF_PATH="/root/.ha-backup.conf"
-CONF_EXAMPLE_PATH="/root/.ha-backup.conf.example"
-CREDENTIALS_PATH="/root/.smbcredentials"
-
-SERVICE_PATH="/etc/systemd/system/ha-backup.service"
-TIMER_PATH="/etc/systemd/system/ha-backup.timer"
 
 echo "========================================"
 echo " Home Assistant Backup Installer"
@@ -49,8 +35,30 @@ apt-get install -y \
     cifs-utils \
     curl \
     findutils \
-    util-linux
+    util-linux \
     coreutils
+
+# =========================================================
+# Проверка доступности версии
+# =========================================================
+
+if ! curl --fail --silent --show-error --location --range 0-0 \
+        "${RAW_BASE}/ha-backup.sh" > /dev/null 2>&1; then
+    echo "ОШИБКА: версия ${REF} недоступна" >&2
+    echo "Проверьте теги: https://github.com/${REPO}/tags" >&2
+    exit 1
+fi
+
+echo "Версия ${REF} доступна, продолжаю..."
+
+INSTALL_PATH="/root/ha-backup.sh"
+
+CONF_PATH="/root/.ha-backup.conf"
+CONF_EXAMPLE_PATH="/root/.ha-backup.conf.example"
+CREDENTIALS_PATH="/root/.smbcredentials"
+
+SERVICE_PATH="/etc/systemd/system/ha-backup.service"
+TIMER_PATH="/etc/systemd/system/ha-backup.timer"
 
 # =========================================================
 # Временные файлы
@@ -198,7 +206,7 @@ echo "  $LOGDIR"
 
 mkdir -p "$LOGDIR"
 
-chmod 750 "$LOGDIR"
+chmod 755 "$LOGDIR"
 chown root:root "$LOGDIR"
 
 # =========================================================
@@ -241,7 +249,7 @@ echo "[7/7] Настройка systemd..."
 
 systemctl daemon-reload
 
-systemctl enable ha-backup.timer
+systemctl enable --now ha-backup.timer
 
 systemctl restart ha-backup.timer
 
@@ -264,7 +272,7 @@ ls -l "$CONF_PATH"
 
 echo
 echo "Service:"
-systemctl cat ha-backup.service --no-pager
+systemctl status ha-backup.service --no-pager | head -5 || true
 
 echo
 echo "Timer:"
