@@ -78,19 +78,19 @@ JOBS=(
     "/ha/|backup/ha/|*.log|yes"
 
     # --- Docker Compose ---
-    "/root/docker-compose.yaml|backup/docker-config/||no"
+    "/root/docker-compose.yaml|docker-config/||no"
 
     # --- Скрипты и конфиги (чтобы восстановить бэкап) ---
-    "/root/ha-backup.sh|backup/scripts/||no"
-    "/root/.ha-backup.conf|backup/scripts/||no"
+    "/root/ha-backup.sh|scripts/||no"
+    "/root/.ha-backup.conf|scripts/||no"
 
     # --- Системные файлы для восстановления ---
-    "/etc/fstab|backup/system/||no"
+    "/etc/fstab|system/||no"
 
     # --- Опционально: раскомментируйте при необходимости ---
-    # "/etc/systemd/system/|backup/systemd/||no"
-    # "/etc/NetworkManager/system-connections/|backup/network/||no"
-    # "/root/.ssh/|backup/ssh/||no"
-    # "/etc/crontab|backup/system/||no"
-    # "/var/spool/cron/crontabs/|backup/cron/||no"
+    # "/etc/systemd/system/|systemd/||no"
+    # "/etc/NetworkManager/system-connections/|network/||no"
+    # "/root/.ssh/|ssh/||no"
+    # "/etc/crontab|system/||no"
+    # "/var/spool/cron/crontabs/|cron/||no"
 )
