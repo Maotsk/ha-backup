@@ -1,14 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-REPO="Maotsk/ha-backup"
-REF="${HA_BACKUP_REF:-v1.0.0}"
-RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
-
-echo "========================================"
-echo " Home Assistant Backup Installer"
-echo " Version: ${REF}"
-echo "========================================"
+# =========================================================
+# Home Assistant Backup Installer
+# =========================================================
 
 # =========================================================
 # Проверка root
@@ -37,6 +32,38 @@ apt-get install -y \
     findutils \
     util-linux \
     coreutils
+
+# =========================================================
+# Определение версии
+# =========================================================
+
+REPO="Maotsk/ha-backup"
+
+REF="${HA_BACKUP_REF:-}"
+
+if [ -z "$REF" ]; then
+    echo
+    echo "Определяю последнюю версию..."
+
+    LATEST_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+                 "https://github.com/${REPO}/releases/latest" \
+                 2>/dev/null || true)
+
+    if [[ "$LATEST_URL" == *"/tag/"* ]]; then
+        REF="${LATEST_URL##*/tag/}"
+    else
+        echo "ВНИМАНИЕ: не удалось определить последнюю версию." >&2
+        echo "Использую fallback: v1.0.0" >&2
+        REF="v1.0.0"
+    fi
+fi
+
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
+
+echo "========================================"
+echo " Home Assistant Backup Installer"
+echo " Version: ${REF}"
+echo "========================================"
 
 # =========================================================
 # Проверка доступности версии
