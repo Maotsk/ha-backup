@@ -319,12 +319,13 @@ for job in "${JOBS[@]}"; do
 
     mkdir -p "$TARGET"
 
-    RSYNC_OPTS=(
-        -rlptDv
-        --stats
-        --no-owner
-        --no-group
-    )
+RSYNC_OPTS=(
+    -rptDv
+    --stats
+    --no-owner
+    --no-group
+    --copy-links
+)
 
     if [ "$BW_LIMIT" != "0" ]; then
         RSYNC_OPTS+=(--bwlimit="$BW_LIMIT")
