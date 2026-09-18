@@ -5,21 +5,16 @@
 ![Last commit](https://img.shields.io/github/last-commit/Maotsk/ha-backup)
 ![Version](https://img.shields.io/github/v/tag/Maotsk/ha-backup?label=version)
 
-Скрипт автоматического бэкапа Home Assistant и сопутствующих конфигов
-с Armbian-хоста на сетевую шару TrueNAS через CIFS/SMB.
+Скрипт автоматического бэкапа Home Assistant и сопутствующих конфигов с Armbian-хоста на сетевую шару TrueNAS через CIFS/SMB.
 
-Проект рассчитан на слабые SBC (Orange Pi, NanoPi, Rock Pi и т.п.),
-работает через `rsync`, поддерживает Telegram-уведомления через SOCKS5
-и автоматически очищает старые логи.
+Проект рассчитан на слабые SBC (Orange Pi, NanoPi, Rock Pi и т.п.), работает через `rsync`, поддерживает Telegram-уведомления через SOCKS5 и автоматически очищает старые логи.
 
 ## Возможности
 
 - **Ежедневный автобэкап** через `systemd timer` (по умолчанию в 04:00).
 - **Инкрементальный rsync** — копируются только изменения, первый запуск полный.
-- **Защита от записи на локальный диск** — перед началом проверяется,
-  что точка монтирования действительно имеет файловую систему `cifs`.
-- **Защита от `rsync --delete` на пустом источнике** — если источник
-  внезапно стал пустым, задача с `--delete` не запускается.
+- **Защита от записи на локальный диск** — перед началом проверяется, что точка монтирования действительно имеет файловую систему `cifs`.
+- **Защита от `rsync --delete` на пустом источнике** — если источник внезапно стал пустым, задача с `--delete` не запускается.
 - **Блокировка параллельного запуска** через `flock`.
 - **Ограничение скорости rsync** через `BW_LIMIT`.
 - **Статистика backup** — количество обработанных задач, файлов и объём данных.
@@ -30,9 +25,8 @@
   - HTML-разметка;
   - понятное описание ошибки.
 - **Ротация логов** — старые логи автоматически удаляются.
-- **Единый конфиг** `/root/.ha-backup.conf`.
-- **Гибкий список задач** — можно добавлять файлы и каталоги,
-  исключения и режим `--delete`.
+- **Единый конфиг** `.ha-backup.conf`.
+- **Гибкий список задач** — можно добавлять файлы и каталоги, исключения и режим `--delete`.
 - **systemd service + timer** — запуск без необходимости держать терминал открытым.
 
 ## Что бэкапится по умолчанию
@@ -41,19 +35,17 @@
 |---|---|---|
 | `/ha/` | `backup/ha/` | yes |
 | `/root/docker-compose.yaml` | `backup/docker-config/` | no |
-| `/root/ha-backup.sh` | `backup/scripts/` | no |
-| `/root/.ha-backup.conf` | `backup/scripts/` | no |
+| `<директория install.sh>/ha-backup.sh` | `backup/scripts/` | no |
+| `<директория install.sh>/.ha-backup.conf` | `backup/scripts/` | no |
 | `/etc/fstab` | `backup/system/` | no |
 
-Список задач можно изменить в `/root/.ha-backup.conf`.
+Пути к `ha-backup.sh` и `.ha-backup.conf` подставляются автоматически при установке — в зависимости от того, где лежит `install.sh`.
 
-> **Безопасность:** файл `/root/.ha-backup.conf` может содержать секреты,
-> например Telegram Bot Token. Поэтому резервная копия
-> `backup/scripts/.ha-backup.conf` должна храниться на защищённой SMB-шаре
-> с ограниченным доступом.
+Список задач можно изменить в конфиге (см. раздел «Конфигурация»).
+
+> **Безопасность:** файл `.ha-backup.conf` может содержать секреты, например Telegram Bot Token. Поэтому резервная копия `backup/scripts/.ha-backup.conf` должна храниться на защищённой SMB-шаре с ограниченным доступом.
 >
-> Файл `/root/.smbcredentials` намеренно **не включён** в список резервного
-> копирования.
+> Файл `.smbcredentials` намеренно **не включён** в список резервного копирования.
 
 ## Стек
 
@@ -152,58 +144,76 @@ cifs
 df -hT /mnt/ha-dataset
 ```
 
-> **Важно:** опция `x-systemd.automount` не требуется.
-> Скрипт самостоятельно проверяет, что `/mnt/ha-dataset` действительно
-> смонтирован как `cifs`.
+> **Важно:** опция `x-systemd.automount` не требуется. Скрипт самостоятельно проверяет, что `/mnt/ha-dataset` действительно смонтирован как `cifs`.
 
 ### 2. Установить HA Backup
 
-Скачать установщик:
+Установщик ставит файлы **в ту же директорию, где лежит сам `install.sh`**. Логи всегда пишутся в `/var/log.hdd/ha`.
+
+**Установка в `/root` (традиционно):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o /tmp/ha-backup-install.sh
+cd /root
+curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o install.sh
+sudo bash install.sh
 ```
 
-Запустить:
+**Установка в `/opt/ha-backup`:**
 
 ```bash
-sudo bash /tmp/ha-backup-install.sh
+sudo mkdir -p /opt/ha-backup
+cd /opt/ha-backup
+curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o install.sh
+sudo bash install.sh
 ```
 
-Установить конкретную версию:
+Установщик покажет итоговые пути и спросит подтверждение `[y/N]`. Если пути не подходят — прервите установку (`Ctrl+C`) и положите `install.sh` в другую директорию.
+
+**Установить конкретную версию:**
 
 ```bash
-HA_BACKUP_REF=v1.0.1 sudo -E bash /tmp/ha-backup-install.sh
+HA_BACKUP_REF=v1.0.1 sudo -E bash install.sh
 ```
 
-Установить последнюю из ветки main:
+**Установить последнюю из ветки `main`:**
 
 ```bash
-HA_BACKUP_REF=main sudo -E bash /tmp/ha-backup-install.sh
+HA_BACKUP_REF=main sudo -E bash install.sh
 ```
 
 Установщик:
 
 - устанавливает необходимые пакеты;
-- устанавливает `/root/ha-backup.sh`;
-- создаёт `/root/.ha-backup.conf`, если его ещё нет;
-- сохраняет существующий `/root/.ha-backup.conf`;
-- устанавливает `ha-backup.service`;
-- устанавливает `ha-backup.timer`;
-- создаёт каталог `/var/log.hdd/ha`;
-- включает ежедневный timer.
+- ставит `ha-backup.sh` рядом с собой;
+- создаёт `.ha-backup.conf` (если его ещё нет);
+- сохраняет существующий `.ha-backup.conf`;
+- настраивает `ha-backup.service` под реальные пути;
+- устанавливает `ha-backup.timer` (ежедневно в 04:00);
+- создаёт `/var/log.hdd/ha`;
+- включает timer.
+
+> **Важно:** не запускайте `install.sh` из `/tmp` — там файлы могут быть удалены при перезагрузке. Скачивайте его сразу в целевую директорию.
 
 ### 3. Настроить конфигурацию
-
-Открыть конфигурацию:
 
 ```bash
 sudo nano /root/.ha-backup.conf
 ```
 
-Заполнить необходимые параметры.
+Если ставили в другую директорию — путь будет `<директория установки>/.ha-backup.conf`.
 
-После изменения установить права:
+Что нужно заполнить:
+
+| Параметр | Зачем |
+|---|---|
+| `DEST` | Куда на шаре складывать бэкапы (обычно менять не нужно) |
+| `MOUNTPOINT` | Точка монтирования шары (должна совпадать с `/etc/fstab`) |
+| `TG_TOKEN` | Токен Telegram-бота (если нужны уведомления) |
+| `TG_CHAT_ID` | ID чата |
+
+Остальное (структура папок на шаре, `JOBS`, `LOGDIR`) — уже настроено.
+
+После изменения:
 
 ```bash
 sudo chmod 600 /root/.ha-backup.conf
@@ -240,8 +250,10 @@ sudo tail -30 /var/log.hdd/ha/ha-backup-$(date +%F).log
 Основной конфигурационный файл:
 
 ```text
-/root/.ha-backup.conf
+<директория установки>/.ha-backup.conf
 ```
+
+Обычно `/root/.ha-backup.conf`. Если ставили в `/opt/ha-backup` — `/opt/ha-backup/.ha-backup.conf`.
 
 Пример:
 
@@ -275,8 +287,8 @@ TG_SILENT_ERROR="false"
 JOBS=(
     "/ha/|ha/|*.log|yes"
     "/root/docker-compose.yaml|docker-config/||no"
-    "/root/ha-backup.sh|scripts/||no"
-    "/root/.ha-backup.conf|scripts/||no"
+    "INSTALL_PATH|scripts/||no"
+    "CONF_PATH|scripts/||no"
     "/etc/fstab|system/||no"
 )
 ```
@@ -337,10 +349,16 @@ TG_PROXY=""
 Расшифровка:
 
 - `/ha/` — источник;
--  `ha/` — каталог назначения относительно `DEST`
-  (итог: `/mnt/ha-dataset/backup/ha/`);
+- `ha/` — каталог назначения относительно `DEST` (итог: `/mnt/ha-dataset/backup/ha/`);
 - `*.log` — исключение;
 - `yes` — использовать `--delete`.
+
+Специальные значения в поле «ИСТОЧНИК»:
+
+- `INSTALL_PATH` — путь к `ha-backup.sh`, подставляется установщиком.
+- `CONF_PATH` — путь к `.ha-backup.conf`, подставляется установщиком.
+
+Эти два значения не нужно менять — они уже правильные после установки.
 
 ### Важный момент для каталогов
 
@@ -368,9 +386,7 @@ no
 
 означает, что существующие файлы на backup не удаляются.
 
-> **Защита:** перед выполнением задачи с `--delete` скрипт проверяет,
-> что источник не является внезапно пустым. Это предотвращает удаление
-> всего backup при аварийной ситуации с источником.
+> **Защита:** перед выполнением задачи с `--delete` скрипт проверяет, что источник не является внезапно пустым. Это предотвращает удаление всего backup при аварийной ситуации с источником.
 
 ### Примеры
 
@@ -422,7 +438,7 @@ sudo systemctl status ha-backup.service --no-pager
 ### Запуск напрямую
 
 ```bash
-sudo /root/ha-backup.sh
+sudo <директория установки>/ha-backup.sh
 ```
 
 ### Смотреть лог в реальном времени
@@ -476,12 +492,16 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/root/ha-backup.sh
+Environment=HA_BACKUP_CONF=<директория установки>/.ha-backup.conf
+Environment=HA_BACKUP_LOG_DIR=/var/log.hdd/ha
+ExecStart=<директория установки>/ha-backup.sh
 User=root
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=6
 ```
+
+`Environment=HA_BACKUP_CONF` и `ExecStart` подставляются установщиком автоматически.
 
 ### Timer
 
@@ -495,11 +515,9 @@ RandomizedDelaySec=5m
 Unit=ha-backup.service
 ```
 
-`RandomizedDelaySec=5m` означает, что фактический запуск может быть немного
-сдвинут относительно 04:00.
+`RandomizedDelaySec=5m` означает, что фактический запуск может быть немного сдвинут относительно 04:00.
 
-`Persistent=true` позволяет systemd выполнить пропущенный запуск после
-того, как система снова включилась.
+`Persistent=true` позволяет systemd выполнить пропущенный запуск после того, как система снова включилась.
 
 ## Защита от параллельного запуска
 
@@ -513,16 +531,17 @@ Unit=ha-backup.service
 
 Это предотвращает одновременный запуск нескольких экземпляров backup.
 
-Например, если предыдущий backup ещё выполняется, второй запуск не начнёт
-копирование параллельно.
+Например, если предыдущий backup ещё выполняется, второй запуск не начнёт копирование параллельно.
 
 ## Восстановление
 
-После успешного backup структура на TrueNAS выглядит примерно так:
+Восстановление **не зависит** от того, куда был установлен скрипт раньше. Вы ставите HA Backup заново в удобное место, а из бэкапа берёте данные и настройки.
+
+Структура на шаре всегда одинаковая:
 
 ```text
 /mnt/ha-dataset/backup/
-├── ha/
+├── ha/                     ← данные Home Assistant
 ├── docker-config/
 │   └── docker-compose.yaml
 ├── scripts/
@@ -532,142 +551,102 @@ Unit=ha-backup.service
     └── fstab
 ```
 
-> `.smbcredentials` намеренно не сохраняется в backup.
-> При восстановлении его необходимо создать заново.
-
-### Восстановление на новом хосте
+### Порядок восстановления
 
 #### 1. Установить Armbian
 
-Установить систему и получить root-доступ.
-
-#### 2. Установить необходимые пакеты
+#### 2. Установить пакеты
 
 ```bash
 sudo apt update
 sudo apt install -y rsync cifs-utils curl docker.io docker-compose-plugin
 ```
 
-#### 3. Создать SMB credentials
+#### 3. Смонтировать шару
 
-```bash
-sudo nano /root/.smbcredentials
-```
-
-Указать:
+Создать `/root/.smbcredentials`:
 
 ```text
 username=ВАШ_ЛОГИН
 password=ВАШ_ПАРОЛЬ
 ```
 
-Установить права:
-
 ```bash
 sudo chmod 600 /root/.smbcredentials
 ```
 
-#### 4. Настроить `/etc/fstab`
-
-Добавить SMB-шару:
+Добавить в `/etc/fstab`:
 
 ```text
 //192.168.68.200/ha /mnt/ha-dataset cifs credentials=/root/.smbcredentials,iocharset=utf8,uid=0,gid=0,file_mode=0700,dir_mode=0700,_netdev,nofail 0 0
 ```
 
-Создать точку монтирования:
-
 ```bash
 sudo mkdir -p /mnt/ha-dataset
-```
-
-Смонтировать:
-
-```bash
+sudo systemctl daemon-reload
 sudo mount /mnt/ha-dataset
+findmnt -n -o FSTYPE --target /mnt/ha-dataset | tail -1
+# должно быть: cifs
 ```
 
-Проверить:
+#### 4. Установить HA Backup
 
 ```bash
-findmnt -n -o FSTYPE --target /mnt/ha-dataset
+cd /root
+curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o install.sh
+sudo bash install.sh
 ```
 
-Должно быть:
+#### 5. Настроить конфиг
 
-```text
-cifs
-```
-
-#### 5. Восстановить конфигурацию backup
+Взять настройки из старого конфига на шаре:
 
 ```bash
-sudo cp /mnt/ha-dataset/backup/scripts/.ha-backup.conf /root/
+sudo cat /mnt/ha-dataset/backup/scripts/.ha-backup.conf
+```
+
+Скопировать оттуда в свежий конфиг:
+
+- `DEST`
+- `MOUNTPOINT`
+- `TG_TOKEN`
+- `TG_CHAT_ID`
+- `TG_PROXY`
+- `BW_LIMIT`
+- `LOG_RETENTION_DAYS`
+
+`JOBS` и `LOGDIR` **оставить как есть** — установщик уже подставил правильные пути.
+
+После правки:
+
+```bash
 sudo chmod 600 /root/.ha-backup.conf
 ```
 
-#### 6. Восстановить скрипт
+#### 6. Восстановить Home Assistant
 
 ```bash
-sudo cp /mnt/ha-dataset/backup/scripts/ha-backup.sh /root/
-sudo chmod +x /root/ha-backup.sh
-```
-
-Проверить синтаксис:
-
-```bash
-sudo bash -n /root/ha-backup.sh
-```
-
-#### 7. Восстановить `/etc/fstab`
-
-Перед заменой рекомендуется сделать резервную копию текущего файла:
-
-```bash
-sudo cp /etc/fstab /etc/fstab.before-ha-restore
-```
-
-Затем:
-
-```bash
-sudo cp /mnt/ha-dataset/backup/system/fstab /etc/fstab
-```
-
-#### 8. Восстановить Home Assistant
-
-```bash
+sudo mkdir -p /ha
 sudo rsync -a /mnt/ha-dataset/backup/ha/ /ha/
 ```
 
-#### 9. Восстановить Docker Compose
+#### 7. Восстановить Docker Compose
 
 ```bash
 sudo cp /mnt/ha-dataset/backup/docker-config/docker-compose.yaml /root/
-```
-
-Затем:
-
-```bash
 cd /root
 sudo docker compose up -d
 ```
 
-#### 10. Восстановить systemd timer
-
-Установить service и timer согласно разделу «Установка».
-
-После этого:
+#### 8. Проверить бэкап
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now ha-backup.timer
+sudo systemctl start ha-backup.service
+sudo systemctl status ha-backup.service --no-pager
+sudo tail -30 /var/log.hdd/ha/ha-backup-$(date +%F).log
 ```
 
-Проверить:
-
-```bash
-systemctl list-timers ha-backup.timer --no-pager
-```
+Если в логе `=== Бэкап успешно завершён ===` — всё работает.
 
 ## Troubleshooting
 
@@ -709,14 +688,13 @@ findmnt -n -o FSTYPE --target /mnt/ha-dataset | tail -1
 
 ### Telegram-сообщение не приходит
 
-Проверить конфигурацию:
+Проверить конфигурацию (путь к конфигу — там, где у вас установлен HA Backup):
 
 ```bash
 sudo bash -c 'source /root/.ha-backup.conf; echo "[$TG_TOKEN] [$TG_CHAT_ID]"'
 ```
 
-> Не публикуйте результат этой команды, если в нём присутствует настоящий
-> Telegram Bot Token.
+> Не публикуйте результат этой команды, если в нём присутствует настоящий Telegram Bot Token.
 
 Проверить соединение через прокси:
 
@@ -764,8 +742,7 @@ findmnt -n -o FSTYPE --target /mnt/ha-dataset
 ping -c 3 192.168.68.200
 ```
 
-Если соединение с SMB-шарой было потеряно во время копирования,
-следующий запуск повторит синхронизацию.
+Если соединение с SMB-шарой было потеряно во время копирования, следующий запуск повторит синхронизацию.
 
 ### `rsync --delete` не запускается
 
@@ -775,8 +752,7 @@ ping -c 3 192.168.68.200
 ls -la /ha/
 ```
 
-Защита предназначена для ситуации, когда источник внезапно стал пустым
-из-за проблемы с монтированием, контейнером или файловой системой.
+Защита предназначена для ситуации, когда источник внезапно стал пустым из-за проблемы с монтированием, контейнером или файловой системой.
 
 Не следует отключать эту защиту без понимания причины.
 
@@ -784,8 +760,7 @@ ls -la /ha/
 
 Для проекта `x-systemd.automount` не требуется.
 
-Если используется такая настройка и появляется проблема с зависшим
-mount-unit, убрать `x-systemd.automount` из `/etc/fstab`.
+Если используется такая настройка и появляется проблема с зависшим mount-unit, убрать `x-systemd.automount` из `/etc/fstab`.
 
 После изменения:
 
@@ -802,7 +777,7 @@ sudo mount /mnt/ha-dataset
 
 ### Логи не удаляются
 
-Проверить параметр:
+Проверить параметр (путь к конфигу — там, где у вас установлен HA Backup):
 
 ```bash
 sudo grep '^LOG_RETENTION_DAYS' /root/.ha-backup.conf
@@ -822,7 +797,7 @@ ls -lah /var/log.hdd/ha/
 
 ### Проверка синтаксиса скрипта
 
-Перед запуском можно проверить Bash-синтаксис:
+Перед запуском можно проверить Bash-синтаксис (путь к скрипту — там, где установлен HA Backup):
 
 ```bash
 sudo bash -n /root/ha-backup.sh
@@ -832,19 +807,20 @@ sudo bash -n /root/ha-backup.sh
 
 ## Обновление
 
-Для обновления достаточно повторно запустить установщик:
+Скачать свежий `install.sh` в директорию, где уже стоит HA Backup, и запустить:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o /tmp/ha-backup-install.sh
-sudo bash /tmp/ha-backup-install.sh
+cd /root   # или /opt/ha-backup, где у вас установлено
+curl -fsSL https://raw.githubusercontent.com/Maotsk/ha-backup/main/install.sh -o install.sh
+sudo bash install.sh
 ```
 
-Существующий /root/.ha-backup.conf не перезаписывается.
+Существующий `.ha-backup.conf` **не перезаписывается**. Обновляется только `ha-backup.sh`, `ha-backup.service` и `ha-backup.timer`.
 
-Чтобы установить конкретную версию, используйте переменную HA_BACKUP_REF:
+Чтобы установить конкретную версию:
 
 ```bash
-HA_BACKUP_REF=v1.0.1 sudo -E bash /tmp/ha-backup-install.sh
+HA_BACKUP_REF=v1.0.1 sudo -E bash install.sh
 ```
 
 ## Версии
