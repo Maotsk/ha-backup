@@ -1,461 +1,411 @@
 #!/bin/bash
 set -euo pipefail
 
-CONF_BACKUP="/root/.ha-backup.conf"
-LOCK_FILE="/run/ha-backup.lock"
-
-if [ ! -f "$CONF_BACKUP" ]; then
-    echo "ОШИБКА: $CONF_BACKUP не найден" >&2
-    exit 1
-fi
-
-# shellcheck disable=SC1090
-source "$CONF_BACKUP"
-
-TG_TOKEN="${TG_TOKEN:-}"
-TG_CHAT_ID="${TG_CHAT_ID:-}"
-TG_PROXY="${TG_PROXY:-}"
-TG_NOTIFY_SUCCESS="${TG_NOTIFY_SUCCESS:-true}"
-TG_NOTIFY_ERROR="${TG_NOTIFY_ERROR:-true}"
-TG_SILENT_SUCCESS="${TG_SILENT_SUCCESS:-true}"
-TG_SILENT_ERROR="${TG_SILENT_ERROR:-false}"
-BW_LIMIT="${BW_LIMIT:-0}"
-
-: "${DEST:?DEST не задан}"
-: "${MOUNTPOINT:?MOUNTPOINT не задан}"
-: "${LOGDIR:?LOGDIR не задан}"
-: "${JOBS:?JOBS не задан}"
-
-mkdir -p "$LOGDIR"
-
-LOGFILE="$LOGDIR/ha-backup-$(date +%F).log"
-
 # =========================================================
-# Защита от параллельного запуска
+# Home Assistant Backup Installer
 # =========================================================
 
-exec 9>"$LOCK_FILE"
-
-if ! flock -n 9; then
-    echo "ОШИБКА: другой экземпляр ha-backup уже запущен" >&2
-    exit 1
-fi
+DEFAULT_INSTALL_DIR="/root"
+DEFAULT_CONF_DIR="/root"
+DEFAULT_LOG_DIR="/var/log.hdd/ha"
 
 # =========================================================
-# Логирование
+# Разбор аргументов
 # =========================================================
 
-log() {
-    echo "$(date +'%Y-%m-%d %H:%M:%S') $*" >> "$LOGFILE"
-}
-
-NOW() {
-    date +'%Y-%m-%d %H:%M:%S'
-}
-
-HOSTNAME_SHORT=$(hostname)
-
-# =========================================================
-# Очистка старых логов
-# =========================================================
-
-cleanup_old_logs() {
-    local days="${LOG_RETENTION_DAYS:-7}"
-    local count
-
-    count=$(
-        find "$LOGDIR" \
-            -maxdepth 1 \
-            -type f \
-            -name 'ha-backup-*.log' \
-            -mtime +"$days" \
-            2>/dev/null |
-        wc -l
-    )
-
-    if [ "$count" -gt 0 ]; then
-        find "$LOGDIR" \
-            -maxdepth 1 \
-            -type f \
-            -name 'ha-backup-*.log' \
-            -mtime +"$days" \
-            -delete \
-            2>/dev/null || true
-
-        echo "$(NOW) Удалено старых логов: $count (старше ${days} дней)" >> "$LOGFILE"
-    fi
-}
-
-# =========================================================
-# Форматирование времени
-# =========================================================
-
-human_duration() {
-    local sec="$1"
-    local hours=$((sec / 3600))
-    local minutes=$(((sec % 3600) / 60))
-    local seconds=$((sec % 60))
-
-    if [ "$hours" -gt 0 ]; then
-        echo "${hours} ч ${minutes} мин ${seconds} сек"
-    elif [ "$minutes" -gt 0 ]; then
-        echo "${minutes} мин ${seconds} сек"
-    else
-        echo "${seconds} сек"
-    fi
-}
-
-# =========================================================
-# HTML escape для Telegram
-# =========================================================
-
-html_escape() {
-    sed \
-        -e 's/&/\&amp;/g' \
-        -e 's/</\&lt;/g' \
-        -e 's/>/\&gt;/g' \
-        -e 's/"/\&quot;/g'
-}
-
-# =========================================================
-# Telegram
-# =========================================================
-
-send_telegram_raw() {
-    local text="$1"
-    local silent="${2:-false}"
-
-    if [ -z "${TG_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
-        log "TG: пропуск — токен или chat_id не заданы"
-        return 0
-    fi
-
-    local curl_args=(
-        --silent
-        --show-error
-        --fail
-        --request POST
-        "https://api.telegram.org/bot${TG_TOKEN}/sendMessage"
-    )
-
-    if [ -n "${TG_PROXY:-}" ]; then
-        curl_args+=(-x "$TG_PROXY")
-    fi
-
-    curl_args+=(
-        --data-urlencode "chat_id=${TG_CHAT_ID}"
-        --data-urlencode "text=${text}"
-        --data-urlencode "parse_mode=HTML"
-        --data-urlencode "disable_notification=${silent}"
-        --max-time 20
-    )
-
-    local response
-
-    if ! response=$(curl "${curl_args[@]}" 2>&1); then
-        log "TG: ошибка curl: $response"
-        return 1
-    fi
-
-    log "TG: silent=${silent} response=${response}"
-
-    if ! printf '%s' "$response" | grep -q '"ok"[[:space:]]*:[[:space:]]*true'; then
-        log "TG: API вернул ошибку"
-        return 1
-    fi
-
-    return 0
-}
-
-send_telegram() {
-    local text="$1"
-    local type="$2"
-
-    if [ "$type" = "success" ]; then
-        [ "${TG_NOTIFY_SUCCESS}" = "true" ] ||
-            {
-                log "TG: success отключён"
-                return 0
-            }
-
-        send_telegram_raw "$text" "${TG_SILENT_SUCCESS}" || true
-
-    elif [ "$type" = "error" ]; then
-        [ "${TG_NOTIFY_ERROR}" = "true" ] ||
-            {
-                log "TG: error отключён"
-                return 0
-            }
-
-        send_telegram_raw "$text" "${TG_SILENT_ERROR}" || true
-    fi
-}
-
-# =========================================================
-# Проверка CIFS mount
-# =========================================================
-
-if ! mountpoint -q "$MOUNTPOINT"; then
-    log "ОШИБКА: $MOUNTPOINT не смонтирован, бэкап прерван"
-
-    MSG="🔴 <b>Бэкап HA не выполнен</b>
-
-<b>Что случилось:</b>
-Сетевая папка (шара TrueNAS) сейчас не подключена.
-
-<b>Последствия:</b>
-Бэкап НЕ сделан. Локальные данные не пострадали.
-
-<b>Что делать:</b>
-Проверьте, включён ли TrueNAS и доступна ли сеть.
-Если всё в порядке — подождите следующего запуска,
-шара подключится автоматически.
-
-Хост: <code>${HOSTNAME_SHORT}</code>
-Время: <code>$(NOW)</code>"
-
-    send_telegram "$MSG" error
-    exit 1
-fi
-
-FSTYPE=$(findmnt -n -o FSTYPE --target "$MOUNTPOINT" 2>/dev/null | tail -1)
-
-if [ "$FSTYPE" != "cifs" ]; then
-    log "ОШИБКА: $MOUNTPOINT имеет тип '$FSTYPE', ожидался cifs"
-
-    MSG="🔴 <b>Бэкап HA не выполнен</b>
-
-<b>Что случилось:</b>
-Папка <code>${MOUNTPOINT}</code> не подключена к сетевой шаре.
-Сейчас это просто локальная папка на SD-карте.
-
-<b>Последствия:</b>
-Бэкап остановлен, чтобы данные не записались
-на локальный накопитель.
-
-<b>Что делать:</b>
-Проверьте связь с TrueNAS.
-
-Хост: <code>${HOSTNAME_SHORT}</code>
-Время: <code>$(NOW)</code>"
-
-    send_telegram "$MSG" error
-    exit 1
-fi
-
-log "Проверки пройдены: $MOUNTPOINT ($FSTYPE) доступен"
-
-# =========================================================
-# Очистка логов
-# =========================================================
-
-cleanup_old_logs
-
-START_TS=$(date +%s)
-
-log "=== Старт бэкапа $(NOW) ==="
-log "Задач в очереди: ${#JOBS[@]}"
-
-TOTAL_FILES=0
-TOTAL_BYTES=0
-COMPLETED_JOBS=0
-
-# =========================================================
-# Backup jobs
-# =========================================================
-
-for job in "${JOBS[@]}"; do
-
-    IFS='|' read -r SRC DST EXCL DEL <<< "$job"
-
-    TARGET="$DEST$DST"
-
-    if [ ! -e "$SRC" ]; then
-        log "ПРЕДУПРЕЖДЕНИЕ: $SRC не существует, пропущено"
-        continue
-    fi
-
-    # -----------------------------------------------------
-    # Защита от rsync --delete на пустом источнике
-    # -----------------------------------------------------
-
-    if [ "$DEL" = "yes" ]; then
-
-        if [ -d "$SRC" ]; then
-            SOURCE_COUNT=$(
-                find "$SRC" \
-                    -mindepth 1 \
-                    -maxdepth 1 \
-                    -print \
-                    -quit \
-                    2>/dev/null |
-                wc -l
-            )
-
-            if [ "$SOURCE_COUNT" -eq 0 ]; then
-
-                log "ОШИБКА: источник $SRC пуст, --delete запрещён"
-
-                MSG="🔴 <b>Бэкап HA остановлен</b>
-
-<b>Причина:</b>
-Источник <code>${SRC}</code> оказался пустым.
-
-Для безопасности операция <code>rsync --delete</code>
-не выполнена.
-
-<b>Это защита от случайного удаления бэкапа.</b>
-
-Хост: <code>${HOSTNAME_SHORT}</code>
-Время: <code>$(NOW)</code>"
-
-                send_telegram "$MSG" error
-                exit 1
-            fi
-        fi
-    fi
-
-    mkdir -p "$TARGET"
-
-    RSYNC_OPTS=(
-        -a
-        -v
-        --stats
-    )
-
-    if [ "$BW_LIMIT" != "0" ]; then
-        RSYNC_OPTS+=(--bwlimit="$BW_LIMIT")
-    fi
-
-    if [ -n "$EXCL" ]; then
-        IFS=',' read -ra EXCL_ARR <<< "$EXCL"
-
-        for e in "${EXCL_ARR[@]}"; do
-            RSYNC_OPTS+=(--exclude="$e")
-        done
-    fi
-
-    if [ "$DEL" = "yes" ]; then
-        RSYNC_OPTS+=(--delete)
-    fi
-
-    log "rsync $SRC -> $TARGET [excl='${EXCL:-нет}' delete=${DEL:-no} bw=${BW_LIMIT}]"
-
-    JOB_LOG="$LOGDIR/.rsync-job-$$.log"
-
-    if rsync "${RSYNC_OPTS[@]}" "$SRC" "$TARGET" > "$JOB_LOG" 2>&1; then
-
-        cat "$JOB_LOG" >> "$LOGFILE"
-
-        JOB_STATS=$(
-            grep -E \
-                'Number of regular files transferred|Total transferred file size|Number of files|Number of created files' \
-                "$JOB_LOG" |
-            tr '\n' '; ' |
-            sed 's/; $//'
-        )
-
-        log "OK: $SRC"
-        log "Статистика: ${JOB_STATS:-нет данных}"
-
-        JOB_FILES=$(
-            awk -F': ' '/Number of regular files transferred/ {gsub(/,/,"",$2); print $2}' "$JOB_LOG" |
-            tail -1
-        )
-
-        JOB_BYTES=$(
-            awk -F': ' '/Total transferred file size/ {
-                gsub(/ bytes/,"",$2)
-                gsub(/,/,"",$2)
-                print $2
-            }' "$JOB_LOG" |
-            tail -1
-        )
-
-        if [[ "$JOB_FILES" =~ ^[0-9]+$ ]]; then
-            TOTAL_FILES=$((TOTAL_FILES + JOB_FILES))
-        fi
-
-        if [[ "$JOB_BYTES" =~ ^[0-9]+$ ]]; then
-            TOTAL_BYTES=$((TOTAL_BYTES + JOB_BYTES))
-        fi
-
-        COMPLETED_JOBS=$((COMPLETED_JOBS + 1))
-
-    else
-
-        RC=$?
-
-        cat "$JOB_LOG" >> "$LOGFILE"
-
-        ERR_TAIL=$(tail -5 "$JOB_LOG" | html_escape)
-
-        log "ОШИБКА: rsync $SRC код $RC"
-
-        MSG="🔴 <b>Бэкап HA прерван</b>
-
-<b>Что случилось:</b>
-Во время копирования данных произошла ошибка.
-Копирование остановлено.
-
-<b>Последствия:</b>
-Часть файлов может быть не скопирована.
-Следующий запуск продолжит работу.
-
-Хост: <code>${HOSTNAME_SHORT}</code>
-Время: <code>$(NOW)</code>
-Что копировалось: <code>${SRC}</code>
-Код ошибки: <code>${RC}</code>
-
-<b>Последние строки лога:</b>
-<pre>${ERR_TAIL}</pre>"
-
-        rm -f "$JOB_LOG"
-
-        send_telegram "$MSG" error
-        exit 1
-    fi
-
-    rm -f "$JOB_LOG"
-
+INSTALL_DIR="${HA_BACKUP_DIR:-$DEFAULT_INSTALL_DIR}"
+CONF_DIR="${HA_BACKUP_CONF_DIR:-$DEFAULT_CONF_DIR}"
+LOG_DIR="${HA_BACKUP_LOG_DIR:-$DEFAULT_LOG_DIR}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir)
+            INSTALL_DIR="$2"
+            shift 2
+            ;;
+        --conf-dir)
+            CONF_DIR="$2"
+            shift 2
+            ;;
+        --log-dir)
+            LOG_DIR="$2"
+            shift 2
+            ;;
+        --help|-h)
+            cat <<EOF
+Использование: sudo bash install.sh [опции]
+
+Опции:
+  --dir PATH        Директория для ha-backup.sh (по умолчанию: /root)
+  --conf-dir PATH   Директория для .ha-backup.conf (по умолчанию: /root)
+  --log-dir PATH    Директория для логов (по умолчанию: /var/log.hdd/ha)
+  --help            Показать эту справку
+
+Переменные окружения:
+  HA_BACKUP_REF        Версия (v1.0.1, main)
+  HA_BACKUP_DIR        То же, что --dir
+  HA_BACKUP_CONF_DIR   То же, что --conf-dir
+  HA_BACKUP_LOG_DIR    То же, что --log-dir
+
+Примеры:
+  sudo bash install.sh
+  sudo bash install.sh --dir /opt/ha-backup --conf-dir /opt/ha-backup
+  HA_BACKUP_DIR=/opt/ha-backup sudo -E bash install.sh
+EOF
+            exit 0
+            ;;
+        *)
+            echo "ОШИБКА: неизвестный аргумент: $1" >&2
+            echo "Используйте --help для справки." >&2
+            exit 1
+            ;;
+    esac
 done
 
 # =========================================================
-# Финальная статистика
+# Проверка root
 # =========================================================
 
-END_TS=$(date +%s)
-DURATION=$((END_TS - START_TS))
-DURATION_HUMAN=$(human_duration "$DURATION")
-
-SIZE_TOTAL=$(du -sh "$DEST" 2>/dev/null | awk '{print $1}')
-
-if [ "$TOTAL_BYTES" -gt 0 ]; then
-    TRANSFERRED_HUMAN=$(numfmt --to=iec "$TOTAL_BYTES")
-else
-    TRANSFERRED_HUMAN="0"
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ОШИБКА: install.sh необходимо запускать от root." >&2
+    exit 1
 fi
 
-log "=== Бэкап успешно завершён $(NOW) ==="
-log "Задач выполнено: ${COMPLETED_JOBS}/${#JOBS[@]}"
-log "Файлов передано: ${TOTAL_FILES}"
-log "Данных передано: ${TRANSFERRED_HUMAN}"
-log "Размер backup: ${SIZE_TOTAL:-неизвестно}"
-log "Время выполнения: ${DURATION_HUMAN}"
+# =========================================================
+# Проверка зависимостей
+# =========================================================
 
-MSG="🟢 <b>Бэкап HA выполнен</b>
+echo
+echo "[1/7] Проверка необходимых пакетов..."
 
-Данные успешно сохранены на TrueNAS.
+export DEBIAN_FRONTEND=noninteractive
 
-Хост: <code>${HOSTNAME_SHORT}</code>
-Время: <code>$(NOW)</code>
+apt-get update
 
-Задач: <code>${COMPLETED_JOBS}/${#JOBS[@]}</code>
-Файлов передано: <code>${TOTAL_FILES}</code>
-Данных передано: <code>${TRANSFERRED_HUMAN}</code>
-Размер backup: <code>${SIZE_TOTAL:-неизвестно}</code>
-Заняло: <code>${DURATION_HUMAN}</code>"
+apt-get install -y \
+    rsync \
+    cifs-utils \
+    curl \
+    findutils \
+    util-linux \
+    coreutils
 
-send_telegram "$MSG" success
+# =========================================================
+# Определение версии
+# =========================================================
+
+REPO="Maotsk/ha-backup"
+
+REF="${HA_BACKUP_REF:-}"
+
+if [ -z "$REF" ]; then
+    echo
+    echo "Определяю последнюю версию..."
+
+    LATEST_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
+                 "https://github.com/${REPO}/releases/latest" \
+                 2>/dev/null || true)
+
+    if [[ "$LATEST_URL" == *"/tag/"* ]]; then
+        REF="${LATEST_URL##*/tag/}"
+    else
+        echo "ВНИМАНИЕ: не удалось определить последнюю версию." >&2
+        echo "Использую fallback: v1.0.0" >&2
+        REF="v1.0.0"
+    fi
+fi
+
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
+
+# =========================================================
+# Проверка/создание директорий
+# =========================================================
+
+echo
+echo "Директория скрипта:   ${INSTALL_DIR}"
+echo "Директория конфига:   ${CONF_DIR}"
+echo "Директория логов:     ${LOG_DIR}"
+
+for dir in "$INSTALL_DIR" "$CONF_DIR" "$LOG_DIR"; do
+    if [ ! -d "$dir" ]; then
+        echo "Создаю директорию: $dir"
+        mkdir -p "$dir"
+    fi
+
+    if [ ! -w "$dir" ]; then
+        echo "ОШИБКА: нет прав на запись в $dir" >&2
+        exit 1
+    fi
+done
+
+INSTALL_PATH="${INSTALL_DIR}/ha-backup.sh"
+CONF_PATH="${CONF_DIR}/.ha-backup.conf"
+CONF_EXAMPLE_PATH="${CONF_DIR}/.ha-backup.conf.example"
+CREDENTIALS_PATH="${CONF_DIR}/.smbcredentials"
+
+SERVICE_PATH="/etc/systemd/system/ha-backup.service"
+TIMER_PATH="/etc/systemd/system/ha-backup.timer"
+
+echo "========================================"
+echo " Home Assistant Backup Installer"
+echo " Version: ${REF}"
+echo "========================================"
+
+# =========================================================
+# Проверка доступности версии
+# =========================================================
+
+if ! curl --fail --silent --show-error --location --range 0-0 \
+        "${RAW_BASE}/ha-backup.sh" > /dev/null 2>&1; then
+    echo "ОШИБКА: версия ${REF} недоступна" >&2
+    echo "Проверьте теги: https://github.com/${REPO}/tags" >&2
+    exit 1
+fi
+
+echo "Версия ${REF} доступна, продолжаю..."
+
+# =========================================================
+# Временные файлы
+# =========================================================
+
+TMP_DIR="$(mktemp -d)"
+
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+
+trap cleanup EXIT
+
+# =========================================================
+# Загрузка
+# =========================================================
+
+echo
+echo "[2/7] Загрузка файлов версии ${REF}..."
+
+download_file() {
+    local url="$1"
+    local destination="$2"
+
+    curl \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --retry 3 \
+        --retry-delay 2 \
+        "$url" \
+        -o "$destination"
+}
+
+download_file "${RAW_BASE}/ha-backup.sh"             "${TMP_DIR}/ha-backup.sh"
+download_file "${RAW_BASE}/.ha-backup.conf.example"  "${TMP_DIR}/.ha-backup.conf.example"
+download_file "${RAW_BASE}/ha-backup.service"        "${TMP_DIR}/ha-backup.service"
+download_file "${RAW_BASE}/ha-backup.timer"          "${TMP_DIR}/ha-backup.timer"
+
+# =========================================================
+# Установка скрипта
+# =========================================================
+
+echo
+echo "[3/7] Проверка ha-backup.sh..."
+
+bash -n "${TMP_DIR}/ha-backup.sh"
+
+install \
+    -o root \
+    -g root \
+    -m 0755 \
+    "${TMP_DIR}/ha-backup.sh" \
+    "$INSTALL_PATH"
+
+echo "Установлен:"
+echo "  $INSTALL_PATH"
+
+# =========================================================
+# Конфигурация
+# =========================================================
+
+echo
+echo "[4/7] Проверка конфигурации..."
+
+if [ ! -f "$CONF_PATH" ]; then
+
+    install \
+        -o root \
+        -g root \
+        -m 0600 \
+        "${TMP_DIR}/.ha-backup.conf.example" \
+        "$CONF_PATH"
+
+    echo "Создан новый конфиг:"
+    echo "  $CONF_PATH"
+
+else
+
+    chmod 600 "$CONF_PATH"
+    chown root:root "$CONF_PATH"
+
+    echo "Существующий конфиг НЕ изменён:"
+    echo "  $CONF_PATH"
+fi
+
+install \
+    -o root \
+    -g root \
+    -m 0644 \
+    "${TMP_DIR}/.ha-backup.conf.example" \
+    "$CONF_EXAMPLE_PATH"
+
+echo "Example-конфиг:"
+echo "  $CONF_EXAMPLE_PATH"
+
+# =========================================================
+# SMB credentials
+# =========================================================
+
+echo
+echo "[5/7] Проверка SMB credentials..."
+
+if [ -f "$CREDENTIALS_PATH" ]; then
+
+    chmod 600 "$CREDENTIALS_PATH"
+    chown root:root "$CREDENTIALS_PATH"
+
+    echo "Credentials найдены:"
+    echo "  $CREDENTIALS_PATH"
+
+else
+
+    echo "ВНИМАНИЕ:"
+    echo "  $CREDENTIALS_PATH не найден."
+    echo
+    echo "Если CIFS использует авторизацию,"
+    echo "создайте credentials перед запуском backup."
+
+fi
+
+# =========================================================
+# Каталог логов
+# =========================================================
+
+echo
+echo "Каталог логов:"
+echo "  $LOG_DIR"
+
+chmod 755 "$LOG_DIR"
+chown root:root "$LOG_DIR"
+
+# =========================================================
+# systemd service
+# =========================================================
+
+echo
+echo "[6/7] Установка systemd service..."
+
+sed \
+    -e "s|^ExecStart=.*|ExecStart=${INSTALL_PATH}|" \
+    -e "s|^Environment=HA_BACKUP_CONF=.*|Environment=HA_BACKUP_CONF=${CONF_PATH}|" \
+    -e "s|^Environment=HA_BACKUP_LOG_DIR=.*|Environment=HA_BACKUP_LOG_DIR=${LOG_DIR}|" \
+    "${TMP_DIR}/ha-backup.service" \
+    > "${TMP_DIR}/ha-backup.service.patched"
+
+install \
+    -o root \
+    -g root \
+    -m 0644 \
+    "${TMP_DIR}/ha-backup.service.patched" \
+    "$SERVICE_PATH"
+
+echo "Установлен:"
+echo "  $SERVICE_PATH"
+echo "  ExecStart=${INSTALL_PATH}"
+echo "  HA_BACKUP_CONF=${CONF_PATH}"
+echo "  HA_BACKUP_LOG_DIR=${LOG_DIR}"
+
+# =========================================================
+# systemd timer
+# =========================================================
+
+install \
+    -o root \
+    -g root \
+    -m 0644 \
+    "${TMP_DIR}/ha-backup.timer" \
+    "$TIMER_PATH"
+
+echo "Установлен:"
+echo "  $TIMER_PATH"
+
+# =========================================================
+# systemd
+# =========================================================
+
+echo
+echo "[7/7] Настройка systemd..."
+
+systemctl daemon-reload
+
+systemctl enable --now ha-backup.timer
+
+systemctl restart ha-backup.timer
+
+# =========================================================
+# Проверка
+# =========================================================
+
+echo
+echo "========================================"
+echo " Проверка установки"
+echo "========================================"
+
+echo
+echo "ha-backup:"
+ls -l "$INSTALL_PATH"
+
+echo
+echo "Конфигурация:"
+ls -l "$CONF_PATH"
+
+echo
+echo "Service:"
+systemctl status ha-backup.service --no-pager | head -5 || true
+
+echo
+echo "Timer:"
+systemctl cat ha-backup.timer --no-pager
+
+echo
+echo "Статус timer:"
+systemctl status ha-backup.timer --no-pager || true
+
+echo
+echo "Следующий запуск:"
+systemctl list-timers ha-backup.timer --no-pager || true
+
+echo
+echo "========================================"
+echo " Установка завершена"
+echo "========================================"
+
+echo
+echo "Конфигурация:"
+echo "  $CONF_PATH"
+
+echo
+echo "Скрипт:"
+echo "  $INSTALL_PATH"
+
+echo
+echo "Ручной запуск:"
+echo "  systemctl start ha-backup.service"
+
+echo
+echo "Проверка лога:"
+echo "  journalctl -u ha-backup.service"
+
+echo
+echo "Логи backup:"
+echo "  $LOG_DIR"
 
 exit 0
