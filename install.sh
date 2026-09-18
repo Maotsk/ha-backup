@@ -5,6 +5,63 @@ set -euo pipefail
 # Home Assistant Backup Installer
 # =========================================================
 
+DEFAULT_INSTALL_DIR="/root"
+DEFAULT_CONF_DIR="/root"
+DEFAULT_LOG_DIR="/var/log.hdd/ha"
+
+# =========================================================
+# Разбор аргументов
+# =========================================================
+
+INSTALL_DIR="${HA_BACKUP_DIR:-$DEFAULT_INSTALL_DIR}"
+CONF_DIR="${HA_BACKUP_CONF_DIR:-$DEFAULT_CONF_DIR}"
+LOG_DIR="${HA_BACKUP_LOG_DIR:-$DEFAULT_LOG_DIR}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --dir)
+            INSTALL_DIR="$2"
+            shift 2
+            ;;
+        --conf-dir)
+            CONF_DIR="$2"
+            shift 2
+            ;;
+        --log-dir)
+            LOG_DIR="$2"
+            shift 2
+            ;;
+        --help|-h)
+            cat <<EOF
+Использование: sudo bash install.sh [опции]
+
+Опции:
+  --dir PATH        Директория для ha-backup.sh (по умолчанию: /root)
+  --conf-dir PATH   Директория для .ha-backup.conf (по умолчанию: /root)
+  --log-dir PATH    Директория для логов (по умолчанию: /var/log.hdd/ha)
+  --help            Показать эту справку
+
+Переменные окружения:
+  HA_BACKUP_REF        Версия (v1.0.1, main)
+  HA_BACKUP_DIR        То же, что --dir
+  HA_BACKUP_CONF_DIR   То же, что --conf-dir
+  HA_BACKUP_LOG_DIR    То же, что --log-dir
+
+Примеры:
+  sudo bash install.sh
+  sudo bash install.sh --dir /opt/ha-backup --conf-dir /opt/ha-backup
+  HA_BACKUP_DIR=/opt/ha-backup sudo -E bash install.sh
+EOF
+            exit 0
+            ;;
+        *)
+            echo "ОШИБКА: неизвестный аргумент: $1" >&2
+            echo "Используйте --help для справки." >&2
+            exit 1
+            ;;
+    esac
+done
+
 # =========================================================
 # Проверка root
 # =========================================================
@@ -60,6 +117,35 @@ fi
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
 
+# =========================================================
+# Проверка/создание директорий
+# =========================================================
+
+echo
+echo "Директория скрипта:   ${INSTALL_DIR}"
+echo "Директория конфига:   ${CONF_DIR}"
+echo "Директория логов:     ${LOG_DIR}"
+
+for dir in "$INSTALL_DIR" "$CONF_DIR" "$LOG_DIR"; do
+    if [ ! -d "$dir" ]; then
+        echo "Создаю директорию: $dir"
+        mkdir -p "$dir"
+    fi
+
+    if [ ! -w "$dir" ]; then
+        echo "ОШИБКА: нет прав на запись в $dir" >&2
+        exit 1
+    fi
+done
+
+INSTALL_PATH="${INSTALL_DIR}/ha-backup.sh"
+CONF_PATH="${CONF_DIR}/.ha-backup.conf"
+CONF_EXAMPLE_PATH="${CONF_DIR}/.ha-backup.conf.example"
+CREDENTIALS_PATH="${CONF_DIR}/.smbcredentials"
+
+SERVICE_PATH="/etc/systemd/system/ha-backup.service"
+TIMER_PATH="/etc/systemd/system/ha-backup.timer"
+
 echo "========================================"
 echo " Home Assistant Backup Installer"
 echo " Version: ${REF}"
@@ -78,15 +164,6 @@ fi
 
 echo "Версия ${REF} доступна, продолжаю..."
 
-INSTALL_PATH="/root/ha-backup.sh"
-
-CONF_PATH="/root/.ha-backup.conf"
-CONF_EXAMPLE_PATH="/root/.ha-backup.conf.example"
-CREDENTIALS_PATH="/root/.smbcredentials"
-
-SERVICE_PATH="/etc/systemd/system/ha-backup.service"
-TIMER_PATH="/etc/systemd/system/ha-backup.timer"
-
 # =========================================================
 # Временные файлы
 # =========================================================
@@ -100,7 +177,7 @@ cleanup() {
 trap cleanup EXIT
 
 # =========================================================
-# Загрузка файлов из репозитория
+# Загрузка
 # =========================================================
 
 echo
@@ -121,24 +198,13 @@ download_file() {
         -o "$destination"
 }
 
-download_file \
-    "${RAW_BASE}/ha-backup.sh" \
-    "${TMP_DIR}/ha-backup.sh"
-
-download_file \
-    "${RAW_BASE}/.ha-backup.conf.example" \
-    "${TMP_DIR}/.ha-backup.conf.example"
-
-download_file \
-    "${RAW_BASE}/ha-backup.service" \
-    "${TMP_DIR}/ha-backup.service"
-
-download_file \
-    "${RAW_BASE}/ha-backup.timer" \
-    "${TMP_DIR}/ha-backup.timer"
+download_file "${RAW_BASE}/ha-backup.sh"             "${TMP_DIR}/ha-backup.sh"
+download_file "${RAW_BASE}/.ha-backup.conf.example"  "${TMP_DIR}/.ha-backup.conf.example"
+download_file "${RAW_BASE}/ha-backup.service"        "${TMP_DIR}/ha-backup.service"
+download_file "${RAW_BASE}/ha-backup.timer"          "${TMP_DIR}/ha-backup.timer"
 
 # =========================================================
-# Проверка загруженного скрипта
+# Установка скрипта
 # =========================================================
 
 echo
@@ -184,7 +250,6 @@ else
     echo "  $CONF_PATH"
 fi
 
-# Сохраняем example отдельно для справки.
 install \
     -o root \
     -g root \
@@ -214,7 +279,6 @@ else
 
     echo "ВНИМАНИЕ:"
     echo "  $CREDENTIALS_PATH не найден."
-
     echo
     echo "Если CIFS использует авторизацию,"
     echo "создайте credentials перед запуском backup."
@@ -225,16 +289,12 @@ fi
 # Каталог логов
 # =========================================================
 
-LOGDIR="/var/log.hdd/ha"
-
 echo
-echo "Создание каталога логов:"
-echo "  $LOGDIR"
+echo "Каталог логов:"
+echo "  $LOG_DIR"
 
-mkdir -p "$LOGDIR"
-
-chmod 755 "$LOGDIR"
-chown root:root "$LOGDIR"
+chmod 755 "$LOG_DIR"
+chown root:root "$LOG_DIR"
 
 # =========================================================
 # systemd service
@@ -243,15 +303,25 @@ chown root:root "$LOGDIR"
 echo
 echo "[6/7] Установка systemd service..."
 
+sed \
+    -e "s|^ExecStart=.*|ExecStart=${INSTALL_PATH}|" \
+    -e "s|^Environment=HA_BACKUP_CONF=.*|Environment=HA_BACKUP_CONF=${CONF_PATH}|" \
+    -e "s|^Environment=HA_BACKUP_LOG_DIR=.*|Environment=HA_BACKUP_LOG_DIR=${LOG_DIR}|" \
+    "${TMP_DIR}/ha-backup.service" \
+    > "${TMP_DIR}/ha-backup.service.patched"
+
 install \
     -o root \
     -g root \
     -m 0644 \
-    "${TMP_DIR}/ha-backup.service" \
+    "${TMP_DIR}/ha-backup.service.patched" \
     "$SERVICE_PATH"
 
 echo "Установлен:"
 echo "  $SERVICE_PATH"
+echo "  ExecStart=${INSTALL_PATH}"
+echo "  HA_BACKUP_CONF=${CONF_PATH}"
+echo "  HA_BACKUP_LOG_DIR=${LOG_DIR}"
 
 # =========================================================
 # systemd timer
@@ -336,6 +406,6 @@ echo "  journalctl -u ha-backup.service"
 
 echo
 echo "Логи backup:"
-echo "  $LOGDIR"
+echo "  $LOG_DIR"
 
 exit 0
