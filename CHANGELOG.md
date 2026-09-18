@@ -9,6 +9,14 @@
 
 Изменения, которые ещё не попали в релиз.
 
+### Fixed
+
+- `ha-backup.sh`: `rsync code 23` на CIFS-шарах — симлинки в `nginx-proxy/letsencrypt/live/` не поддерживаются SMB. Заменено на `-rptDv --copy-links` — симлинки разыменовываются, содержимое сертификатов копируется как обычные файлы.
+
+### Changed
+
+- `ha-backup.sh`: `RSYNC_OPTS` — убран `-l` из `-rlptDv`, добавлен `--copy-links`.
+
 ## [1.0.1] - 2026-09-18
 
 ### Added
