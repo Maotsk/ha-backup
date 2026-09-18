@@ -13,9 +13,37 @@ set -euo pipefail
 #   backup/docker-config/ — docker-compose.yaml
 #   backup/scripts/       — скрипт и конфиг
 #   backup/system/        — fstab
+#
+# Если GitHub заблокирован — скрипт пробует зеркала.
+# Можно задать своё:
+#   HA_BACKUP_MIRROR=https://gh-proxy.com/https://github.com sudo -E bash install.sh
 # =========================================================
 
 LOG_DIR="/var/log.hdd/ha"
+
+REPO="Maotsk/ha-backup"
+
+# =========================================================
+# Зеркала GitHub
+# =========================================================
+#
+# Формат: "тип|URL"
+#   prefix  = https://gh-proxy.com/https://github.com
+#             Скачивание: ${URL}/Maotsk/ha-backup/raw/${REF}/...
+#   replace = https://kkgithub.com
+#             Скачивание: ${URL}/Maotsk/ha-backup/raw/${REF}/...
+#
+# Пробуются по очереди. Первое рабочее — используется.
+
+GITHUB_MIRROR="${HA_BACKUP_MIRROR:-}"
+
+GITHUB_MIRRORS_CANDIDATES=(
+    "prefix|https://gh-proxy.com/https://github.com"
+    "prefix|https://ghproxy.net/https://github.com"
+    "replace|https://xget.xi-xu.me/gh"
+    "replace|https://kkgithub.com"
+    "replace|https://github.com"
+)
 
 # =========================================================
 # Проверка root
@@ -97,10 +125,85 @@ apt-get install -y \
     coreutils
 
 # =========================================================
-# Определение версии
+# Выбор рабочего зеркала GitHub
 # =========================================================
 
-REPO="Maotsk/ha-backup"
+echo
+echo "[2/7] Проверка доступа к GitHub..."
+
+# Функция проверки зеркала
+# $1 = URL зеркала
+# Возвращает 0, если зеркало отдаёт README.md
+check_mirror() {
+    local base="$1"
+    local test_url="${base}/${REPO}/raw/main/README.md"
+
+    curl \
+        --fail \
+        --silent \
+        --show-error \
+        --location \
+        --max-time 10 \
+        --range 0-0 \
+        "$test_url" > /dev/null 2>&1
+}
+
+MIRROR_KIND=""
+MIRROR_BASE=""
+
+if [ -n "$GITHUB_MIRROR" ]; then
+    # Пользователь задал своё зеркало
+    echo "Использую зеркало из HA_BACKUP_MIRROR: ${GITHUB_MIRROR}"
+
+    if check_mirror "$GITHUB_MIRROR"; then
+        MIRROR_KIND="custom"
+        MIRROR_BASE="$GITHUB_MIRROR"
+    else
+        echo "ВНИМАНИЕ: заданное зеркало недоступно." >&2
+        echo "Пробую стандартный список..." >&2
+    fi
+fi
+
+if [ -z "$MIRROR_BASE" ]; then
+    for entry in "${GITHUB_MIRRORS_CANDIDATES[@]}"; do
+        IFS='|' read -r kind base <<< "$entry"
+
+        echo "  пробую: ${base}"
+
+        if check_mirror "$base"; then
+            MIRROR_KIND="$kind"
+            MIRROR_BASE="$base"
+            echo "  ✅ доступно"
+            break
+        else
+            echo "  ✗ не отвечает"
+        fi
+    done
+fi
+
+if [ -z "$MIRROR_BASE" ]; then
+    echo
+    echo "ОШИБКА: не удалось найти рабочее зеркало GitHub." >&2
+    echo >&2
+    echo "Варианты решения:" >&2
+    echo "  1. Задать своё зеркало:" >&2
+    echo "     HA_BACKUP_MIRROR=https://gh-proxy.com/https://github.com \\" >&2
+    echo "         sudo -E bash install.sh" >&2
+    echo >&2
+    echo "  2. Использовать прокси:" >&2
+    echo "     export https_proxy=socks5h://127.0.0.1:1080" >&2
+    echo "     sudo -E bash install.sh" >&2
+    echo >&2
+    echo "  3. Использовать proxychains:" >&2
+    echo "     sudo proxychains4 bash install.sh" >&2
+    exit 1
+fi
+
+echo "Использую зеркало: ${MIRROR_BASE}"
+
+# =========================================================
+# Определение версии
+# =========================================================
 
 REF="${HA_BACKUP_REF:-}"
 
@@ -108,8 +211,11 @@ if [ -z "$REF" ]; then
     echo
     echo "Определяю последнюю версию..."
 
+    # Для определения версии используем зеркало, если оно prefix
+    # (для replace — тоже работает)
     LATEST_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-                 "https://github.com/${REPO}/releases/latest" \
+                 --max-time 15 \
+                 "${MIRROR_BASE}/${REPO}/releases/latest" \
                  2>/dev/null || true)
 
     if [[ "$LATEST_URL" == *"/tag/"* ]]; then
@@ -121,7 +227,7 @@ if [ -z "$REF" ]; then
     fi
 fi
 
-RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
+RAW_BASE="${MIRROR_BASE}/${REPO}/raw/${REF}"
 
 echo
 echo "Версия для установки: ${REF}"
@@ -147,6 +253,7 @@ done
 # =========================================================
 
 if ! curl --fail --silent --show-error --location --range 0-0 \
+        --max-time 15 \
         "${RAW_BASE}/ha-backup.sh" > /dev/null 2>&1; then
     echo "ОШИБКА: версия ${REF} недоступна" >&2
     echo "Проверьте теги: https://github.com/${REPO}/tags" >&2
@@ -172,7 +279,7 @@ trap cleanup EXIT
 # =========================================================
 
 echo
-echo "[2/7] Загрузка файлов версии ${REF}..."
+echo "[3/7] Загрузка файлов версии ${REF}..."
 
 download_file() {
     local url="$1"
@@ -185,6 +292,7 @@ download_file() {
         --location \
         --retry 3 \
         --retry-delay 2 \
+        --max-time 60 \
         "$url" \
         -o "$destination"
 }
@@ -199,7 +307,7 @@ download_file "${RAW_BASE}/ha-backup.timer"          "${TMP_DIR}/ha-backup.timer
 # =========================================================
 
 echo
-echo "[3/7] Проверка ha-backup.sh..."
+echo "[4/7] Проверка ha-backup.sh..."
 
 bash -n "${TMP_DIR}/ha-backup.sh"
 
@@ -218,7 +326,7 @@ echo "  $INSTALL_PATH"
 # =========================================================
 
 echo
-echo "[4/7] Проверка конфигурации..."
+echo "[5/7] Проверка конфигурации..."
 
 if [ ! -f "$CONF_PATH" ]; then
 
@@ -263,7 +371,7 @@ echo "  $CONF_EXAMPLE_PATH"
 # =========================================================
 
 echo
-echo "[5/7] Проверка SMB credentials..."
+echo "Проверка SMB credentials..."
 
 if [ -f "$CREDENTIALS_PATH" ]; then
 
@@ -352,6 +460,9 @@ echo
 echo "========================================"
 echo " Установка завершена"
 echo "========================================"
+echo
+echo "Использовано зеркало:"
+echo "  ${MIRROR_BASE}"
 echo
 echo "Скрипт:"
 echo "  $INSTALL_PATH"
