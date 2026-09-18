@@ -27,6 +27,8 @@
 - **Ротация логов** — старые логи автоматически удаляются.
 - **Единый конфиг** `.ha-backup.conf`.
 - **Гибкий список задач** — можно добавлять файлы и каталоги, исключения и режим `--delete`.
+- **Автоопределение версии** при установке через GitHub API.
+- **Работа через зеркала GitHub**, если прямой доступ заблокирован.
 - **systemd service + timer** — запуск без необходимости держать терминал открытым.
 
 ## Что бэкапится по умолчанию
@@ -69,6 +71,7 @@
 - `systemd`.
 - Для Telegram-уведомлений — Telegram-бот.
 - SOCKS5-прокси — опционально.
+- Доступ к `api.github.com` и `raw.githubusercontent.com` или зеркалу GitHub.
 
 Установщик автоматически устанавливает необходимые пакеты:
 
@@ -150,6 +153,8 @@ df -hT /mnt/ha-dataset
 
 Установщик ставит файлы **в ту же директорию, где лежит сам `install.sh`**. Логи всегда пишутся в `/var/log.hdd/ha`.
 
+Версия определяется автоматически через `api.github.com` (или через зеркало, если GitHub заблокирован).
+
 **Установка в `/root` (традиционно):**
 
 ```bash
@@ -172,7 +177,7 @@ sudo bash install.sh
 **Установить конкретную версию:**
 
 ```bash
-HA_BACKUP_REF=v1.0.1 sudo -E bash install.sh
+HA_BACKUP_REF=1.0.2 sudo -E bash install.sh
 ```
 
 **Установить последнюю из ветки `main`:**
@@ -184,6 +189,8 @@ HA_BACKUP_REF=main sudo -E bash install.sh
 Установщик:
 
 - устанавливает необходимые пакеты;
+- определяет последнюю версию через `api.github.com`;
+- выбирает рабочее зеркало GitHub, если прямой доступ заблокирован;
 - ставит `ha-backup.sh` рядом с собой;
 - создаёт `.ha-backup.conf` (если его ещё нет);
 - сохраняет существующий `.ha-backup.conf`;
@@ -193,6 +200,32 @@ HA_BACKUP_REF=main sudo -E bash install.sh
 - включает timer.
 
 > **Важно:** не запускайте `install.sh` из `/tmp` — там файлы могут быть удалены при перезагрузке. Скачивайте его сразу в целевую директорию.
+
+#### Если GitHub заблокирован
+
+Установщик **сам пробует зеркала** по очереди, если прямой доступ к `github.com` или `api.github.com` не работает:
+
+```
+[3/7] Проверка доступности GitHub...
+  пробую: https://raw.githubusercontent.com
+  ✗ не отвечает
+  пробую: https://gh-proxy.com/https://raw.githubusercontent.com
+  ✅ доступно
+```
+
+Можно задать своё зеркало вручную:
+
+```bash
+HA_BACKUP_MIRROR="https://gh-proxy.com/https://raw.githubusercontent.com" \
+    sudo -E bash install.sh
+```
+
+Или использовать SOCKS5-прокси:
+
+```bash
+export https_proxy="socks5h://127.0.0.1:1080"
+sudo -E bash install.sh
+```
 
 ### 3. Настроить конфигурацию
 
@@ -744,6 +777,29 @@ ping -c 3 192.168.68.200
 
 Если соединение с SMB-шарой было потеряно во время копирования, следующий запуск повторит синхронизацию.
 
+### `rsync` завершился с кодом 23
+
+Код 23 означает частичную передачу — обычно из-за попытки сменить владельца или группу файлов на CIFS-шаре. Начиная с версии 1.0.1 скрипт использует флаги `--no-owner --no-group`, что решает проблему.
+
+Проверить, что флаги применены:
+
+```bash
+sudo grep -A 6 'RSYNC_OPTS=(' /root/ha-backup.sh
+```
+
+Должно быть:
+
+```bash
+RSYNC_OPTS=(
+    -rlptDv
+    --stats
+    --no-owner
+    --no-group
+)
+```
+
+Если флагов нет — обновите скрипт через `install.sh`.
+
 ### `rsync --delete` не запускается
 
 Если появляется сообщение о пустом источнике, сначала проверить источник:
@@ -805,6 +861,56 @@ sudo bash -n /root/ha-backup.sh
 
 Если команда ничего не вывела и вернула код `0`, синтаксис корректен.
 
+### Установщик не может достучаться до GitHub
+
+Если видите:
+
+```text
+ВНИМАНИЕ: не удалось определить последнюю версию.
+Использую fallback: v1.0.0
+...
+ОШИБКА: версия v1.0.0 недоступна
+```
+
+или
+
+```text
+ОШИБКА: не удалось найти рабочее зеркало.
+```
+
+Проверьте доступ к `api.github.com` и `raw.githubusercontent.com`:
+
+```bash
+curl -fsSL -o /dev/null -w '%{http_code}\n' --max-time 10 \
+    "https://api.github.com/repos/Maotsk/ha-backup/releases/latest"
+
+curl -fsSL -o /dev/null -w '%{http_code}\n' --max-time 10 \
+    "https://raw.githubusercontent.com/Maotsk/ha-backup/main/README.md"
+```
+
+Должно быть `200` в обоих случаях. Если один из них не отвечает — используйте зеркало:
+
+```bash
+HA_BACKUP_MIRROR="https://gh-proxy.com/https://raw.githubusercontent.com" \
+    sudo -E bash install.sh
+```
+
+Или SOCKS5-прокси:
+
+```bash
+export https_proxy="socks5h://127.0.0.1:1080"
+sudo -E bash install.sh
+```
+
+Популярные зеркала (установщик пробует их автоматически):
+
+| Зеркало | Формат URL |
+|---|---|
+| `https://raw.githubusercontent.com` | прямой |
+| `https://gh-proxy.com/https://raw.githubusercontent.com` | префикс |
+| `https://ghproxy.net/https://raw.githubusercontent.com` | префикс |
+| `https://cdn.jsdelivr.net/gh` | CDN |
+
 ## Обновление
 
 Скачать свежий `install.sh` в директорию, где уже стоит HA Backup, и запустить:
@@ -817,20 +923,28 @@ sudo bash install.sh
 
 Существующий `.ha-backup.conf` **не перезаписывается**. Обновляется только `ha-backup.sh`, `ha-backup.service` и `ha-backup.timer`.
 
-Чтобы установить конкретную версию:
+Установщик автоматически определит последнюю версию и скачает её. Чтобы установить конкретную:
 
 ```bash
-HA_BACKUP_REF=v1.0.1 sudo -E bash install.sh
+HA_BACKUP_REF=1.0.2 sudo -E bash install.sh
+```
+
+Если GitHub заблокирован:
+
+```bash
+HA_BACKUP_MIRROR="https://gh-proxy.com/https://raw.githubusercontent.com" \
+    sudo -E bash install.sh
 ```
 
 ## Версии
 
 Проект использует Semantic Versioning:
 
-- `v1.0.0` — первый стабильный релиз.
-- `v1.0.1` — исправление ошибок без изменения функциональности.
-- `v1.1.0` — новые возможности без нарушения совместимости.
-- `v2.0.0` — изменения, нарушающие совместимость.
+- `1.0.0` — первый стабильный релиз.
+- `1.0.1` — упрощённая установка, фикс `rsync code 23`.
+- `1.0.2` — автоопределение версии через API, зеркала GitHub.
+- `1.1.0` — новые возможности без нарушения совместимости.
+- `2.0.0` — изменения, нарушающие совместимость.
 
 ## Лицензия
 
