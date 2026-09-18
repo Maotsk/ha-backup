@@ -99,6 +99,6 @@ systemctl cat ha-backup.service | grep ExecStart
 - **Единый конфиг** `.ha-backup.conf`.
 - **Гибкий список задач** — добавление файлов, каталогов, исключений, режим `--delete`.
 
-[Unreleased]: https://github.com/Maotsk/ha-backup/compare/1.0.1...HEAD
-[1.0.1]: https://github.com/Maotsk/ha-backup/compare/1.0.0...1.0.1
-[1.0.0]: https://github.com/Maotsk/ha-backup/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Maotsk/ha-backup/compare/v1.0.1...HEAD
+[v1.0.1]: https://github.com/Maotsk/ha-backup/compare/v1.0.0...v1.0.1
+[v1.0.0]: https://github.com/Maotsk/ha-backup/releases/tag/v1.0.0
