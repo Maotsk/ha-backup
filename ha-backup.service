@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+Environment=HA_BACKUP_CONF=/root/.ha-backup.conf
+Environment=HA_BACKUP_LOG_DIR=/var/log.hdd/ha
 ExecStart=/root/ha-backup.sh
 User=root
 Nice=10
