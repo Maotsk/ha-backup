@@ -101,4 +101,4 @@ systemctl cat ha-backup.service | grep ExecStart
 
 [Unreleased]: https://github.com/Maotsk/ha-backup/compare/1.0.1...HEAD
 [1.0.1]: https://github.com/Maotsk/ha-backup/compare/1.0.0...1.0.1
-[1.0.0]: https://github.com/Maotsk/ha-backup/releases/tag/1.0.0
+[1.0.0]: https://github.com/Maotsk/ha-backup/releases/tag/v1.0.0
