@@ -4,63 +4,18 @@ set -euo pipefail
 # =========================================================
 # Home Assistant Backup Installer
 # =========================================================
-
-DEFAULT_INSTALL_DIR="/root"
-DEFAULT_CONF_DIR="/root"
-DEFAULT_LOG_DIR="/var/log.hdd/ha"
-
+#
+# Установщик ставит файлы в директорию, где лежит сам.
+# Логи всегда в /var/log.hdd/ha.
+#
+# Структура на шаре TrueNAS фиксирована:
+#   backup/ha/            — данные Home Assistant
+#   backup/docker-config/ — docker-compose.yaml
+#   backup/scripts/       — скрипт и конфиг
+#   backup/system/        — fstab
 # =========================================================
-# Разбор аргументов
-# =========================================================
 
-INSTALL_DIR="${HA_BACKUP_DIR:-$DEFAULT_INSTALL_DIR}"
-CONF_DIR="${HA_BACKUP_CONF_DIR:-$DEFAULT_CONF_DIR}"
-LOG_DIR="${HA_BACKUP_LOG_DIR:-$DEFAULT_LOG_DIR}"
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --dir)
-            INSTALL_DIR="$2"
-            shift 2
-            ;;
-        --conf-dir)
-            CONF_DIR="$2"
-            shift 2
-            ;;
-        --log-dir)
-            LOG_DIR="$2"
-            shift 2
-            ;;
-        --help|-h)
-            cat <<EOF
-Использование: sudo bash install.sh [опции]
-
-Опции:
-  --dir PATH        Директория для ha-backup.sh (по умолчанию: /root)
-  --conf-dir PATH   Директория для .ha-backup.conf (по умолчанию: /root)
-  --log-dir PATH    Директория для логов (по умолчанию: /var/log.hdd/ha)
-  --help            Показать эту справку
-
-Переменные окружения:
-  HA_BACKUP_REF        Версия (v1.0.1, main)
-  HA_BACKUP_DIR        То же, что --dir
-  HA_BACKUP_CONF_DIR   То же, что --conf-dir
-  HA_BACKUP_LOG_DIR    То же, что --log-dir
-
-Примеры:
-  sudo bash install.sh
-  sudo bash install.sh --dir /opt/ha-backup --conf-dir /opt/ha-backup
-  HA_BACKUP_DIR=/opt/ha-backup sudo -E bash install.sh
-EOF
-            exit 0
-            ;;
-        *)
-            echo "ОШИБКА: неизвестный аргумент: $1" >&2
-            echo "Используйте --help для справки." >&2
-            exit 1
-            ;;
-    esac
-done
+LOG_DIR="/var/log.hdd/ha"
 
 # =========================================================
 # Проверка root
@@ -70,6 +25,57 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "ОШИБКА: install.sh необходимо запускать от root." >&2
     exit 1
 fi
+
+# =========================================================
+# Определение директорий
+# =========================================================
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+INSTALL_DIR="$SCRIPT_DIR"
+CONF_DIR="$SCRIPT_DIR"
+
+INSTALL_PATH="${INSTALL_DIR}/ha-backup.sh"
+CONF_PATH="${CONF_DIR}/.ha-backup.conf"
+CONF_EXAMPLE_PATH="${CONF_DIR}/.ha-backup.conf.example"
+CREDENTIALS_PATH="${CONF_DIR}/.smbcredentials"
+
+SERVICE_PATH="/etc/systemd/system/ha-backup.service"
+TIMER_PATH="/etc/systemd/system/ha-backup.timer"
+
+# =========================================================
+# Информация перед установкой
+# =========================================================
+
+echo "========================================"
+echo " Home Assistant Backup Installer"
+echo "========================================"
+echo
+echo "Установка в:"
+echo "  Скрипт:   ${INSTALL_PATH}"
+echo "  Конфиг:   ${CONF_PATH}"
+echo "  Логи:     ${LOG_DIR}/"
+echo
+echo "Структура на шаре TrueNAS:"
+echo "  backup/ha/            — данные Home Assistant"
+echo "  backup/docker-config/ — docker-compose.yaml"
+echo "  backup/scripts/       — скрипт и конфиг"
+echo "  backup/system/        — fstab"
+echo
+echo "Расписание: ежедневно в 04:00 (со случайной задержкой до 5 мин)"
+echo
+
+read -r -p "Продолжить установку? [y/N]: " CONFIRM
+
+case "$CONFIRM" in
+    [yY]|[yY][eE][sS])
+        echo "Продолжаю..."
+        ;;
+    *)
+        echo "Отменено пользователем."
+        exit 0
+        ;;
+esac
 
 # =========================================================
 # Проверка зависимостей
@@ -117,14 +123,12 @@ fi
 
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/${REF}"
 
+echo
+echo "Версия для установки: ${REF}"
+
 # =========================================================
 # Проверка/создание директорий
 # =========================================================
-
-echo
-echo "Директория скрипта:   ${INSTALL_DIR}"
-echo "Директория конфига:   ${CONF_DIR}"
-echo "Директория логов:     ${LOG_DIR}"
 
 for dir in "$INSTALL_DIR" "$CONF_DIR" "$LOG_DIR"; do
     if [ ! -d "$dir" ]; then
@@ -137,19 +141,6 @@ for dir in "$INSTALL_DIR" "$CONF_DIR" "$LOG_DIR"; do
         exit 1
     fi
 done
-
-INSTALL_PATH="${INSTALL_DIR}/ha-backup.sh"
-CONF_PATH="${CONF_DIR}/.ha-backup.conf"
-CONF_EXAMPLE_PATH="${CONF_DIR}/.ha-backup.conf.example"
-CREDENTIALS_PATH="${CONF_DIR}/.smbcredentials"
-
-SERVICE_PATH="/etc/systemd/system/ha-backup.service"
-TIMER_PATH="/etc/systemd/system/ha-backup.timer"
-
-echo "========================================"
-echo " Home Assistant Backup Installer"
-echo " Version: ${REF}"
-echo "========================================"
 
 # =========================================================
 # Проверка доступности версии
@@ -231,11 +222,18 @@ echo "[4/7] Проверка конфигурации..."
 
 if [ ! -f "$CONF_PATH" ]; then
 
+    sed \
+        -e "s|INSTALL_PATH|${INSTALL_PATH}|g" \
+        -e "s|CONF_PATH|${CONF_PATH}|g" \
+        -e "s|LOGDIR=\"/var/log.hdd/ha\"|LOGDIR=\"${LOG_DIR}\"|" \
+        "${TMP_DIR}/.ha-backup.conf.example" \
+        > "${TMP_DIR}/.ha-backup.conf.patched"
+
     install \
         -o root \
         -g root \
         -m 0600 \
-        "${TMP_DIR}/.ha-backup.conf.example" \
+        "${TMP_DIR}/.ha-backup.conf.patched" \
         "$CONF_PATH"
 
     echo "Создан новый конфиг:"
@@ -293,6 +291,7 @@ echo
 echo "Каталог логов:"
 echo "  $LOG_DIR"
 
+mkdir -p "$LOG_DIR"
 chmod 755 "$LOG_DIR"
 chown root:root "$LOG_DIR"
 
@@ -319,9 +318,6 @@ install \
 
 echo "Установлен:"
 echo "  $SERVICE_PATH"
-echo "  ExecStart=${INSTALL_PATH}"
-echo "  HA_BACKUP_CONF=${CONF_PATH}"
-echo "  HA_BACKUP_LOG_DIR=${LOG_DIR}"
 
 # =========================================================
 # systemd timer
@@ -345,67 +341,46 @@ echo
 echo "[7/7] Настройка systemd..."
 
 systemctl daemon-reload
-
 systemctl enable --now ha-backup.timer
-
 systemctl restart ha-backup.timer
 
 # =========================================================
-# Проверка
+# Итог
 # =========================================================
-
-echo
-echo "========================================"
-echo " Проверка установки"
-echo "========================================"
-
-echo
-echo "ha-backup:"
-ls -l "$INSTALL_PATH"
-
-echo
-echo "Конфигурация:"
-ls -l "$CONF_PATH"
-
-echo
-echo "Service:"
-systemctl status ha-backup.service --no-pager | head -5 || true
-
-echo
-echo "Timer:"
-systemctl cat ha-backup.timer --no-pager
-
-echo
-echo "Статус timer:"
-systemctl status ha-backup.timer --no-pager || true
-
-echo
-echo "Следующий запуск:"
-systemctl list-timers ha-backup.timer --no-pager || true
 
 echo
 echo "========================================"
 echo " Установка завершена"
 echo "========================================"
-
-echo
-echo "Конфигурация:"
-echo "  $CONF_PATH"
-
 echo
 echo "Скрипт:"
 echo "  $INSTALL_PATH"
-
 echo
-echo "Ручной запуск:"
-echo "  systemctl start ha-backup.service"
-
+echo "Конфигурация:"
+echo "  $CONF_PATH"
 echo
-echo "Проверка лога:"
-echo "  journalctl -u ha-backup.service"
-
+echo "Логи:"
+echo "  $LOG_DIR/"
 echo
-echo "Логи backup:"
-echo "  $LOG_DIR"
+echo "Что дальше:"
+echo
+echo "  1. Отредактируйте конфиг:"
+echo "       sudo nano $CONF_PATH"
+echo
+echo "     Проверьте:"
+echo "       DEST        — путь к шаре (обычно менять не нужно)"
+echo "       MOUNTPOINT  — точка монтирования шары"
+echo "       TG_TOKEN    — если нужны уведомления в Telegram"
+echo "       TG_CHAT_ID"
+echo
+echo "  2. Проверьте timer:"
+echo "       systemctl list-timers ha-backup.timer --no-pager"
+echo
+echo "  3. Запустите бэкап вручную:"
+echo "       sudo systemctl start ha-backup.service"
+echo
+echo "  4. Смотрите лог:"
+echo "       sudo tail -f $LOG_DIR/ha-backup-\$(date +%F).log"
+echo
 
 exit 0
