@@ -8,41 +8,25 @@ set -euo pipefail
 # Установщик ставит файлы в директорию, где лежит сам.
 # Логи всегда в /var/log.hdd/ha.
 #
-# Структура на шаре TrueNAS фиксирована:
-#   backup/ha/            — данные Home Assistant
-#   backup/docker-config/ — docker-compose.yaml
-#   backup/scripts/       — скрипт и конфиг
-#   backup/system/        — fstab
-#
-# Если GitHub заблокирован — скрипт пробует зеркала.
+# Если GitHub недоступен напрямую — скрипт пробует зеркала.
 # Можно задать своё:
-#   HA_BACKUP_MIRROR=https://gh-proxy.com/https://github.com sudo -E bash install.sh
+#   HA_BACKUP_MIRROR=https://gh-proxy.com/https://raw.githubusercontent.com \
+#       sudo -E bash install.sh
 # =========================================================
 
 LOG_DIR="/var/log.hdd/ha"
-
 REPO="Maotsk/ha-backup"
 
-# =========================================================
-# Зеркала GitHub
-# =========================================================
-#
-# Формат: "тип|URL"
-#   prefix  = https://gh-proxy.com/https://github.com
-#             Скачивание: ${URL}/Maotsk/ha-backup/raw/${REF}/...
-#   replace = https://kkgithub.com
-#             Скачивание: ${URL}/Maotsk/ha-backup/raw/${REF}/...
-#
-# Пробуются по очереди. Первое рабочее — используется.
-
+# Пользовательское зеркало (опционально)
 GITHUB_MIRROR="${HA_BACKUP_MIRROR:-}"
 
-GITHUB_MIRRORS_CANDIDATES=(
-    "prefix|https://gh-proxy.com/https://github.com"
-    "prefix|https://ghproxy.net/https://github.com"
-    "replace|https://xget.xi-xu.me/gh"
-    "replace|https://kkgithub.com"
-    "replace|https://github.com"
+# Список зеркал для raw-файлов
+# prefix-тип: полный URL до raw.githubusercontent.com
+MIRROR_RAW_CANDIDATES=(
+    "https://raw.githubusercontent.com"
+    "https://gh-proxy.com/https://raw.githubusercontent.com"
+    "https://ghproxy.net/https://raw.githubusercontent.com"
+    "https://cdn.jsdelivr.net/gh"
 )
 
 # =========================================================
@@ -72,7 +56,7 @@ SERVICE_PATH="/etc/systemd/system/ha-backup.service"
 TIMER_PATH="/etc/systemd/system/ha-backup.timer"
 
 # =========================================================
-# Информация перед установкой
+# Информация
 # =========================================================
 
 echo "========================================"
@@ -96,13 +80,8 @@ echo
 read -r -p "Продолжить установку? [y/N]: " CONFIRM
 
 case "$CONFIRM" in
-    [yY]|[yY][eE][sS])
-        echo "Продолжаю..."
-        ;;
-    *)
-        echo "Отменено пользователем."
-        exit 0
-        ;;
+    [yY]|[yY][eE][sS]) echo "Продолжаю..." ;;
+    *) echo "Отменено пользователем."; exit 0 ;;
 esac
 
 # =========================================================
@@ -113,30 +92,50 @@ echo
 echo "[1/7] Проверка необходимых пакетов..."
 
 export DEBIAN_FRONTEND=noninteractive
-
 apt-get update
-
 apt-get install -y \
-    rsync \
-    cifs-utils \
-    curl \
-    findutils \
-    util-linux \
-    coreutils
+    rsync cifs-utils curl findutils util-linux coreutils
 
 # =========================================================
-# Выбор рабочего зеркала GitHub
+# Определение версии
 # =========================================================
 
 echo
-echo "[2/7] Проверка доступа к GitHub..."
+echo "[2/7] Определение версии..."
 
-# Функция проверки зеркала
-# $1 = URL зеркала
-# Возвращает 0, если зеркало отдаёт README.md
-check_mirror() {
+REF="${HA_BACKUP_REF:-}"
+
+if [ -z "$REF" ]; then
+    # Пробуем api.github.com (надёжнее всего)
+    LATEST_TAG=$(curl -fsSL --max-time 15 \
+                 "https://api.github.com/repos/${REPO}/releases/latest" \
+                 2>/dev/null \
+                 | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' \
+                 | head -1 \
+                 | cut -d'"' -f4 || true)
+
+    if [ -n "$LATEST_TAG" ]; then
+        REF="$LATEST_TAG"
+    else
+        echo "ВНИМАНИЕ: не удалось определить последнюю версию через API." >&2
+        echo "Использую fallback: v1.0.0" >&2
+        REF="v1.0.0"
+    fi
+fi
+
+echo "Версия: ${REF}"
+
+# =========================================================
+# Выбор зеркала для raw-файлов
+# =========================================================
+
+echo
+echo "[3/7] Проверка доступности GitHub..."
+
+# Проверка зеркала — читает первые 1 байт README
+check_raw_mirror() {
     local base="$1"
-    local test_url="${base}/${REPO}/raw/main/README.md"
+    local test_url="${base}/${REPO}/${REF}/README.md"
 
     curl \
         --fail \
@@ -148,31 +147,25 @@ check_mirror() {
         "$test_url" > /dev/null 2>&1
 }
 
-MIRROR_KIND=""
-MIRROR_BASE=""
+MIRROR_RAW=""
 
+# Если пользователь задал своё зеркало — пробуем в первую очередь
 if [ -n "$GITHUB_MIRROR" ]; then
-    # Пользователь задал своё зеркало
-    echo "Использую зеркало из HA_BACKUP_MIRROR: ${GITHUB_MIRROR}"
-
-    if check_mirror "$GITHUB_MIRROR"; then
-        MIRROR_KIND="custom"
-        MIRROR_BASE="$GITHUB_MIRROR"
+    echo "Пробую своё зеркало: ${GITHUB_MIRROR}"
+    if check_raw_mirror "$GITHUB_MIRROR"; then
+        MIRROR_RAW="$GITHUB_MIRROR"
+        echo "  ✅ доступно"
     else
-        echo "ВНИМАНИЕ: заданное зеркало недоступно." >&2
-        echo "Пробую стандартный список..." >&2
+        echo "  ✗ не отвечает"
     fi
 fi
 
-if [ -z "$MIRROR_BASE" ]; then
-    for entry in "${GITHUB_MIRRORS_CANDIDATES[@]}"; do
-        IFS='|' read -r kind base <<< "$entry"
-
+# Если не задано или не сработало — пробуем стандартные
+if [ -z "$MIRROR_RAW" ]; then
+    for base in "${MIRROR_RAW_CANDIDATES[@]}"; do
         echo "  пробую: ${base}"
-
-        if check_mirror "$base"; then
-            MIRROR_KIND="$kind"
-            MIRROR_BASE="$base"
+        if check_raw_mirror "$base"; then
+            MIRROR_RAW="$base"
             echo "  ✅ доступно"
             break
         else
@@ -181,97 +174,39 @@ if [ -z "$MIRROR_BASE" ]; then
     done
 fi
 
-if [ -z "$MIRROR_BASE" ]; then
+if [ -z "$MIRROR_RAW" ]; then
     echo
-    echo "ОШИБКА: не удалось найти рабочее зеркало GitHub." >&2
-    echo >&2
+    echo "ОШИБКА: не удалось найти рабочее зеркало." >&2
+    echo
     echo "Варианты решения:" >&2
     echo "  1. Задать своё зеркало:" >&2
-    echo "     HA_BACKUP_MIRROR=https://gh-proxy.com/https://github.com \\" >&2
+    echo "     HA_BACKUP_MIRROR=https://gh-proxy.com/https://raw.githubusercontent.com \\" >&2
     echo "         sudo -E bash install.sh" >&2
-    echo >&2
+    echo
     echo "  2. Использовать прокси:" >&2
     echo "     export https_proxy=socks5h://127.0.0.1:1080" >&2
     echo "     sudo -E bash install.sh" >&2
-    echo >&2
-    echo "  3. Использовать proxychains:" >&2
-    echo "     sudo proxychains4 bash install.sh" >&2
     exit 1
 fi
 
-echo "Использую зеркало: ${MIRROR_BASE}"
-
-# =========================================================
-# Определение версии
-# =========================================================
-
-REF="${HA_BACKUP_REF:-}"
-
-if [ -z "$REF" ]; then
-    echo
-    echo "Определяю последнюю версию..."
-
-    # Для определения версии используем зеркало, если оно prefix
-    # (для replace — тоже работает)
-    LATEST_URL=$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-                 --max-time 15 \
-                 "${MIRROR_BASE}/${REPO}/releases/latest" \
-                 2>/dev/null || true)
-
-    if [[ "$LATEST_URL" == *"/tag/"* ]]; then
-        REF="${LATEST_URL##*/tag/}"
-    else
-        echo "ВНИМАНИЕ: не удалось определить последнюю версию." >&2
-        echo "Использую fallback: v1.0.0" >&2
-        REF="v1.0.0"
-    fi
-fi
-
-RAW_BASE="${MIRROR_BASE}/${REPO}/raw/${REF}"
-
-echo
-echo "Версия для установки: ${REF}"
+RAW_BASE="${MIRROR_RAW}/${REPO}/${REF}"
+echo "Использую: ${MIRROR_RAW}"
 
 # =========================================================
 # Проверка/создание директорий
 # =========================================================
 
 for dir in "$INSTALL_DIR" "$CONF_DIR" "$LOG_DIR"; do
-    if [ ! -d "$dir" ]; then
-        echo "Создаю директорию: $dir"
-        mkdir -p "$dir"
-    fi
-
-    if [ ! -w "$dir" ]; then
-        echo "ОШИБКА: нет прав на запись в $dir" >&2
-        exit 1
-    fi
+    [ -d "$dir" ] || mkdir -p "$dir"
+    [ -w "$dir" ] || { echo "ОШИБКА: нет прав на запись в $dir" >&2; exit 1; }
 done
-
-# =========================================================
-# Проверка доступности версии
-# =========================================================
-
-if ! curl --fail --silent --show-error --location --range 0-0 \
-        --max-time 15 \
-        "${RAW_BASE}/ha-backup.sh" > /dev/null 2>&1; then
-    echo "ОШИБКА: версия ${REF} недоступна" >&2
-    echo "Проверьте теги: https://github.com/${REPO}/tags" >&2
-    exit 1
-fi
-
-echo "Версия ${REF} доступна, продолжаю..."
 
 # =========================================================
 # Временные файлы
 # =========================================================
 
 TMP_DIR="$(mktemp -d)"
-
-cleanup() {
-    rm -rf "$TMP_DIR"
-}
-
+cleanup() { rm -rf "$TMP_DIR"; }
 trap cleanup EXIT
 
 # =========================================================
@@ -279,7 +214,7 @@ trap cleanup EXIT
 # =========================================================
 
 echo
-echo "[3/7] Загрузка файлов версии ${REF}..."
+echo "[4/7] Загрузка файлов версии ${REF}..."
 
 download_file() {
     local url="$1"
@@ -293,8 +228,7 @@ download_file() {
         --retry 3 \
         --retry-delay 2 \
         --max-time 60 \
-        "$url" \
-        -o "$destination"
+        "$url" -o "$destination"
 }
 
 download_file "${RAW_BASE}/ha-backup.sh"             "${TMP_DIR}/ha-backup.sh"
@@ -307,29 +241,19 @@ download_file "${RAW_BASE}/ha-backup.timer"          "${TMP_DIR}/ha-backup.timer
 # =========================================================
 
 echo
-echo "[4/7] Проверка ha-backup.sh..."
+echo "[5/7] Проверка и установка ha-backup.sh..."
 
 bash -n "${TMP_DIR}/ha-backup.sh"
 
-install \
-    -o root \
-    -g root \
-    -m 0755 \
-    "${TMP_DIR}/ha-backup.sh" \
-    "$INSTALL_PATH"
-
-echo "Установлен:"
-echo "  $INSTALL_PATH"
+install -o root -g root -m 0755 \
+    "${TMP_DIR}/ha-backup.sh" "$INSTALL_PATH"
+echo "Установлен: $INSTALL_PATH"
 
 # =========================================================
 # Конфигурация
 # =========================================================
 
-echo
-echo "[5/7] Проверка конфигурации..."
-
 if [ ! -f "$CONF_PATH" ]; then
-
     sed \
         -e "s|INSTALL_PATH|${INSTALL_PATH}|g" \
         -e "s|CONF_PATH|${CONF_PATH}|g" \
@@ -337,67 +261,33 @@ if [ ! -f "$CONF_PATH" ]; then
         "${TMP_DIR}/.ha-backup.conf.example" \
         > "${TMP_DIR}/.ha-backup.conf.patched"
 
-    install \
-        -o root \
-        -g root \
-        -m 0600 \
-        "${TMP_DIR}/.ha-backup.conf.patched" \
-        "$CONF_PATH"
-
-    echo "Создан новый конфиг:"
-    echo "  $CONF_PATH"
-
+    install -o root -g root -m 0600 \
+        "${TMP_DIR}/.ha-backup.conf.patched" "$CONF_PATH"
+    echo "Создан конфиг: $CONF_PATH"
 else
-
     chmod 600 "$CONF_PATH"
     chown root:root "$CONF_PATH"
-
-    echo "Существующий конфиг НЕ изменён:"
-    echo "  $CONF_PATH"
+    echo "Существующий конфиг НЕ изменён: $CONF_PATH"
 fi
 
-install \
-    -o root \
-    -g root \
-    -m 0644 \
-    "${TMP_DIR}/.ha-backup.conf.example" \
-    "$CONF_EXAMPLE_PATH"
-
-echo "Example-конфиг:"
-echo "  $CONF_EXAMPLE_PATH"
+install -o root -g root -m 0644 \
+    "${TMP_DIR}/.ha-backup.conf.example" "$CONF_EXAMPLE_PATH"
 
 # =========================================================
 # SMB credentials
 # =========================================================
 
-echo
-echo "Проверка SMB credentials..."
-
 if [ -f "$CREDENTIALS_PATH" ]; then
-
     chmod 600 "$CREDENTIALS_PATH"
     chown root:root "$CREDENTIALS_PATH"
-
-    echo "Credentials найдены:"
-    echo "  $CREDENTIALS_PATH"
-
+    echo "Credentials найдены: $CREDENTIALS_PATH"
 else
-
-    echo "ВНИМАНИЕ:"
-    echo "  $CREDENTIALS_PATH не найден."
-    echo
-    echo "Если CIFS использует авторизацию,"
-    echo "создайте credentials перед запуском backup."
-
+    echo "ВНИМАНИЕ: $CREDENTIALS_PATH не найден."
 fi
 
 # =========================================================
-# Каталог логов
+# Логи
 # =========================================================
-
-echo
-echo "Каталог логов:"
-echo "  $LOG_DIR"
 
 mkdir -p "$LOG_DIR"
 chmod 755 "$LOG_DIR"
@@ -408,7 +298,7 @@ chown root:root "$LOG_DIR"
 # =========================================================
 
 echo
-echo "[6/7] Установка systemd service..."
+echo "[6/7] Установка systemd service и timer..."
 
 sed \
     -e "s|^ExecStart=.*|ExecStart=${INSTALL_PATH}|" \
@@ -417,29 +307,11 @@ sed \
     "${TMP_DIR}/ha-backup.service" \
     > "${TMP_DIR}/ha-backup.service.patched"
 
-install \
-    -o root \
-    -g root \
-    -m 0644 \
-    "${TMP_DIR}/ha-backup.service.patched" \
-    "$SERVICE_PATH"
+install -o root -g root -m 0644 \
+    "${TMP_DIR}/ha-backup.service.patched" "$SERVICE_PATH"
 
-echo "Установлен:"
-echo "  $SERVICE_PATH"
-
-# =========================================================
-# systemd timer
-# =========================================================
-
-install \
-    -o root \
-    -g root \
-    -m 0644 \
-    "${TMP_DIR}/ha-backup.timer" \
-    "$TIMER_PATH"
-
-echo "Установлен:"
-echo "  $TIMER_PATH"
+install -o root -g root -m 0644 \
+    "${TMP_DIR}/ha-backup.timer" "$TIMER_PATH"
 
 # =========================================================
 # systemd
@@ -461,28 +333,16 @@ echo "========================================"
 echo " Установка завершена"
 echo "========================================"
 echo
-echo "Использовано зеркало:"
-echo "  ${MIRROR_BASE}"
-echo
-echo "Скрипт:"
-echo "  $INSTALL_PATH"
-echo
-echo "Конфигурация:"
-echo "  $CONF_PATH"
-echo
-echo "Логи:"
-echo "  $LOG_DIR/"
+echo "Версия:  ${REF}"
+echo "Зеркало: ${MIRROR_RAW}"
+echo "Скрипт:  ${INSTALL_PATH}"
+echo "Конфиг:  ${CONF_PATH}"
+echo "Логи:    ${LOG_DIR}/"
 echo
 echo "Что дальше:"
 echo
 echo "  1. Отредактируйте конфиг:"
-echo "       sudo nano $CONF_PATH"
-echo
-echo "     Проверьте:"
-echo "       DEST        — путь к шаре (обычно менять не нужно)"
-echo "       MOUNTPOINT  — точка монтирования шары"
-echo "       TG_TOKEN    — если нужны уведомления в Telegram"
-echo "       TG_CHAT_ID"
+echo "       sudo nano ${CONF_PATH}"
 echo
 echo "  2. Проверьте timer:"
 echo "       systemctl list-timers ha-backup.timer --no-pager"
@@ -491,7 +351,7 @@ echo "  3. Запустите бэкап вручную:"
 echo "       sudo systemctl start ha-backup.service"
 echo
 echo "  4. Смотрите лог:"
-echo "       sudo tail -f $LOG_DIR/ha-backup-\$(date +%F).log"
+echo "       sudo tail -f ${LOG_DIR}/ha-backup-\$(date +%F).log"
 echo
 
 exit 0
