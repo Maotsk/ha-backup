@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- `ha-backup.sh`: autofs не триггерился из-за `mountpoint`/`findmnt`. Добавлено реальное обращение `ls` к папке + retry-цикл до 30 секунд.
 - `ha-backup.sh`: `rsync code 23` на CIFS-шарах — симлинки в `nginx-proxy/letsencrypt/live/` не поддерживаются SMB. Заменено на `-rptDv --copy-links` — симлинки разыменовываются, содержимое сертификатов копируется как обычные файлы.
 
 ### Changed
