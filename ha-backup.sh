@@ -197,21 +197,37 @@ send_telegram() {
 # Проверка CIFS mount
 # =========================================================
 
+# Триггерим autofs реальным обращением к папке
+# (mountpoint и findmnt НЕ триггерят autofs, только ls/stat/open)
+ls "$MOUNTPOINT/" >/dev/null 2>&1 || true
+
+# Ждём, пока шара смонтируется (до 30 секунд)
+FSTYPE=""
+for i in $(seq 1 30); do
+    if mountpoint -q "$MOUNTPOINT"; then
+        FSTYPE=$(findmnt -n -o FSTYPE --target "$MOUNTPOINT" 2>/dev/null | tail -1)
+        if [ "$FSTYPE" = "cifs" ]; then
+            log "Шара смонтирована (попытка $i/30)"
+            break
+        fi
+    fi
+    sleep 1
+done
+
 if ! mountpoint -q "$MOUNTPOINT"; then
-    log "ОШИБКА: $MOUNTPOINT не смонтирован, бэкап прерван"
+    log "ОШИБКА: $MOUNTPOINT не смонтирован за 30 секунд, бэкап прерван"
 
     MSG="🔴 <b>Бэкап HA не выполнен</b>
 
 <b>Что случилось:</b>
-Сетевая папка (шара TrueNAS) сейчас не подключена.
+Autofs не смонтировал сетевую шару за 30 секунд.
 
 <b>Последствия:</b>
 Бэкап НЕ сделан. Локальные данные не пострадали.
 
 <b>Что делать:</b>
-Проверьте, включён ли TrueNAS и доступна ли сеть.
-Если всё в порядке — подождите следующего запуска,
-шара подключится автоматически.
+Проверьте связь с TrueNAS.
+Если всё в порядке — следующий запуск попробует снова.
 
 Хост: <code>${HOSTNAME_SHORT}</code>
 Время: <code>$(NOW)</code>"
@@ -220,16 +236,14 @@ if ! mountpoint -q "$MOUNTPOINT"; then
     exit 1
 fi
 
-FSTYPE=$(findmnt -n -o FSTYPE --target "$MOUNTPOINT" 2>/dev/null | tail -1)
-
 if [ "$FSTYPE" != "cifs" ]; then
-    log "ОШИБКА: $MOUNTPOINT имеет тип '$FSTYPE', ожидался cifs"
+    log "ОШИБКА: $MOUNTPOINT имеет тип '$FSTYPE', ожидался cifs (после 30 сек)"
 
     MSG="🔴 <b>Бэкап HA не выполнен</b>
 
 <b>Что случилось:</b>
-Папка <code>${MOUNTPOINT}</code> не подключена к сетевой шаре.
-Сейчас это просто локальная папка на SD-карте.
+Папка <code>${MOUNTPOINT}</code> не подключилась к сетевой шаре
+за 30 секунд (тип: <code>${FSTYPE}</code>).
 
 <b>Последствия:</b>
 Бэкап остановлен, чтобы данные не записались
